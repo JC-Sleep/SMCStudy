@@ -38,6 +38,12 @@ public class SeckillException extends RuntimeException {
         return new SeckillException(400, "已售罄");
     }
 
+    // 2026-03-26 新增：库存临时不足（可能有回滚）
+    public static SeckillException stockInsufficientRetry() {
+        return new SeckillException(400, "活动火爆，请稍后刷新重试");
+    }
+    // end 2026-03-26 新增
+
     public static SeckillException grabLimitExceeded() {
         return new SeckillException(400, "超过限购数量");
     }

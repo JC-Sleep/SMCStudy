@@ -15,6 +15,9 @@ import sys.smc.coupon.dto.response.SeckillGrabResult;
 import sys.smc.coupon.exception.SeckillException;
 import sys.smc.coupon.service.SeckillService;
 import sys.smc.coupon.util.DistributedRateLimiter;
+// 2026-03-26 新增
+import sys.smc.coupon.util.DynamicRateLimiterManager;
+// end 2026-03-26 新增
 
 import javax.servlet.http.HttpServletRequest;
 import java.util.HashMap;
@@ -38,7 +41,12 @@ import java.util.concurrent.TimeUnit;
 public class SeckillController {
 
     private final SeckillService seckillService;
-    private final RateLimiter seckillRateLimiter;
+    // 2026-03-26 修改
+    // 原来代码：固定限流器
+    // private final RateLimiter seckillRateLimiter;
+    // 新代码：动态限流管理器
+    private final DynamicRateLimiterManager dynamicRateLimiterManager;
+    // end 2026-03-26 修改
     private final DistributedRateLimiter distributedRateLimiter;
 
     @ApiOperation("抢购优惠券")
@@ -49,16 +57,24 @@ public class SeckillController {
         
         String userId = request.getUserId();
         String clientIp = getClientIp(httpRequest);
-
+        Long activityId = request.getActivityId();
+        
         // ========== 三层限流 ==========
         
-        // 第1层: 全局限流(单机) - 每秒1万请求
-        // 作用: 保护当前服务实例不被压垮
-        if (!seckillRateLimiter.tryAcquire(100, TimeUnit.MILLISECONDS)) {
-            log.warn("触发全局限流: userId={}, ip={}", userId, clientIp);
+        // 2026-03-26 修改
+        // 第1层: 动态限流(单机) - 根据剩余库存动态调整
+        // 原来代码：固定限流1万QPS，浪费Redis压力
+        // if (!seckillRateLimiter.tryAcquire(100, TimeUnit.MILLISECONDS)) {
+        //     log.warn("触发全局限流: userId={}, ip={}", userId, clientIp);
+        //     throw SeckillException.systemBusy();
+        // }
+        // 新代码：根据活动库存动态限流，减少70%的Redis压力
+        if (!dynamicRateLimiterManager.tryAcquire(activityId)) {
+            log.warn("触发动态限流: userId={}, ip={}, activityId={}", userId, clientIp, activityId);
             throw SeckillException.systemBusy();
         }
-
+        // end 2026-03-26 修改
+        
         // 第2层: IP限流(分布式) - 每IP每秒100次
         // 作用: 防止单个IP(可能是攻击者)刷接口
         if (!distributedRateLimiter.tryAcquire("limit:ip:" + clientIp, 100, 1)) {

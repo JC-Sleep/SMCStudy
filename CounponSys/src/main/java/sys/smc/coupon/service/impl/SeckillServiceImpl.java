@@ -229,14 +229,17 @@ public class SeckillServiceImpl implements SeckillService {
 
     /**
      * 处理Lua脚本返回结果
+     * 
+     * 2026-03-26 优化：库存不足时智能判断提示信息
      */
-    private SeckillGrabResult handleLuaResult(Long result) {
+    private SeckillGrabResult handleLuaResult(Long result, Long activityId) {
         if (result == null) {
             return SeckillGrabResult.fail("系统异常");
         }
         switch (result.intValue()) {
             case -1:
-                throw SeckillException.soldOut();
+                // 2026-03-26 优化：库存不足时，智能判断是临时不足还是真正售罄
+                return handleStockInsufficient(activityId);
             case -2:
                 throw SeckillException.grabLimitExceeded();
             case -3:
@@ -245,6 +248,49 @@ public class SeckillServiceImpl implements SeckillService {
                 return SeckillGrabResult.fail("抢购失败");
         }
     }
+
+    // 2026-03-26 新增
+    /**
+     * 处理库存不足（智能判断）
+     * 
+     * 场景：
+     * 1. Redis库存=0，但DB还有库存 → "活动火爆，请稍后重试"（可能有回滚）
+     * 2. Redis库存=0，DB也=0，但有待处理订单 → "活动火爆，请稍后重试"（等待处理结果）
+     * 3. Redis库存=0，DB也=0，无待处理订单 → "已售罄"（真正售罄）
+     * 
+     * 为什么这样设计？
+     * - 场景1：DB库存>0说明Kafka还没消费完，或者有失败回滚的可能
+     * - 场景2：有待处理订单，可能会失败回滚库存
+     * - 场景3：DB和Redis都没库存，且订单都处理完了，确认售罄
+     */
+    private SeckillGrabResult handleStockInsufficient(Long activityId) {
+        // 1. 检查DB真实库存
+        SeckillActivity activity = activityMapper.selectById(activityId);
+        if (activity == null) {
+            throw SeckillException.activityNotFound();
+        }
+        
+        // 2. 检查是否有待处理订单
+        long pendingCount = orderMapper.selectCount(
+                new LambdaQueryWrapper<SeckillOrder>()
+                        .eq(SeckillOrder::getActivityId, activityId)
+                        .eq(SeckillOrder::getStatus, 0) // 待处理
+        );
+        
+        // 3. 智能判断
+        if (activity.getRemainStock() > 0 || pendingCount > 0) {
+            // DB还有库存 或 有订单正在处理（可能会回滚库存）
+            log.info("Redis库存临时不足: activityId={}, DB库存={}, 待处理订单={}", 
+                    activityId, activity.getRemainStock(), pendingCount);
+            throw SeckillException.stockInsufficientRetry();
+        } else {
+            // DB库存也为0，且无待处理订单，真的售罄了
+            log.info("活动真正售罄: activityId={}, DB库存={}, 待处理订单={}", 
+                    activityId, activity.getRemainStock(), pendingCount);
+            throw SeckillException.soldOut();
+        }
+    }
+    // end 2026-03-26 新增
 
     /**
      * 生成订单号

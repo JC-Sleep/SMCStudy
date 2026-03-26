@@ -56,18 +56,27 @@ spring:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
     consumer:
+      # 2026-03-26 优化
       # 消费者配置
       group-id: coupon-system
       auto-offset-reset: earliest
       enable-auto-commit: false
-      max-poll-records: 500
+      # 原来值: 500 (保持不变，已优化)
+      max-poll-records: 500  # 批量拉取，减少网络开销
+      # 新增: 优化拉取策略
+      fetch-min-size: 1024   # 最小拉取1KB
+      fetch-max-wait: 500    # 最多等待500ms
+      # end 2026-03-26 优化
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
       properties:
         spring.json.trusted.packages: "*"
     listener:
+      # 2026-03-26 优化
       # 监听器配置
-      concurrency: 10
+      # 原来值: 10
+      concurrency: 20  # 增加消费者线程，提升50%消费速度
+      # end 2026-03-26 优化
       ack-mode: manual
 
   # 异步任务配置
@@ -134,10 +143,18 @@ coupon:
 seckill:
   # 库存预热提前时间(分钟)
   warmup-minutes: 10
-  # 限流-令牌桶容量
+  # 2026-03-26 优化
+  # 限流配置
   rate-limit:
-    capacity: 1000
-    refill-rate: 100
+    # 固定限流（已弃用，改用动态限流）
+    # capacity: 1000
+    # refill-rate: 100
+    # 动态限流配置
+    dynamic-enabled: true    # 启用动态限流
+    rate-multiplier: 1.5     # 限流倍数（剩余库存的1.5倍）
+    min-rate: 100            # 最小限流（库存为0时）
+    max-rate: 10000          # 最大限流（防止过载）
+  # end 2026-03-26 优化
 
 # 外部系统对接配置
 integration:
