@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>org.example</groupId>
+    <artifactId>smartoneCloud</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <modules>
+        <module>Eureka</module>
+        <module>FirstProvider-A</module>
+        <module>FirstProvider-nacos</module>
+        <module>BacaList_add_data</module>
+        <module>cornjob</module>
+        <module>DailySettmentCase</module>
+        <module>PaymentSys</module>
+        <module>CounponSys</module>
+    </modules>
+    <!--    SpringCloud 是聚合项目 需要在这里加上pom：手动添加-->
+    <packaging>pom</packaging>
+    <properties>
+        <maven.compiler.source>8</maven.compiler.source>
+        <maven.compiler.target>8</maven.compiler.target>
+    </properties>
+    <!--SpringBoot 父starter包 控制子项目jar版本号与父一致-->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.1.6.RELEASE</version>
+        <relativePath/>
+    </parent>
+
+    <!--一些全局必备依赖-->
+    <dependencies>
+        <!--SpringBoot自动配置-->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+        </dependency>
+        <!--SpringBoot启动器-->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-thymeleaf</artifactId>
+        </dependency>
+        <!--单元测试：这个可以不必备-->
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <version>4.12</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <!--SpringCloud的依赖管理-->
+    <dependencyManagement>
+        <!--依赖关系-->
+        <dependencies>
+            <!--依赖-->
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>Greenwich.SR1</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <!--建立插件-->
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

@@ -1,0 +1,106 @@
+spring:
+  application:
+    name: payment-system
+
+  # 数据源配置
+  datasource:
+    driver-class-name: oracle.jdbc.OracleDriver
+    url: jdbc:oracle:thin:@localhost:1521:ORCL
+    username: ${DB_USERNAME:payment_user}
+    password: ${DB_PASSWORD:payment_pass}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      pool-name: PaymentHikariPool
+
+  # 异步任务配置
+  task:
+    execution:
+      pool:
+        core-size: 10
+        max-size: 50
+        queue-capacity: 100
+        keep-alive: 60s
+        thread-name-prefix: payment-async-
+    scheduling:
+      pool:
+        size: 5
+        thread-name-prefix: payment-scheduled-
+
+# MyBatis-Plus 配置
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-aliases-package: sys.smc.payment.entity
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
+    cache-enabled: false
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+    banner: false
+
+# 支付网关配置
+scb:
+  api:
+    endpoint: ${SCB_API_ENDPOINT:https://api.standardchartered.com/payment}
+    key: ${SCB_API_KEY:your_api_key_here}
+    secret: ${SCB_API_SECRET:your_api_secret_here}
+  timeout:
+    seconds: 120
+  callback:
+    retry:
+      max: 5
+      delay: 5000
+
+# 对账配置
+payment:
+  reconciliation:
+    cron: "0 */30 * * * ?"  # 每30分钟执行一次
+    daily-cron: "0 0 3 * * ?"  # 每天凌晨3点执行全量对账
+  timeout:
+    threshold: 300  # 5分钟
+  callback:
+    url: ${CALLBACK_BASE_URL:http://localhost:8080}/api/payment/callback/standard-chartered
+
+# 服务器配置
+server:
+  port: 8080
+  servlet:
+    context-path: /
+  tomcat:
+    max-threads: 200
+    accept-count: 100
+
+# 日志配置
+logging:
+  level:
+    root: INFO
+    sys.smc.payment: DEBUG
+    com.baomidou.mybatisplus: INFO
+    org.springframework.web: INFO
+    org.springframework.scheduling: INFO
+  pattern:
+    console: "%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(${LOG_LEVEL_PATTERN:%5p}) %clr(${PID:- }){magenta} %clr(---){faint} %clr([%15.15t]){faint} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n${LOG_EXCEPTION_CONVERSION_WORD:%wEx}"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n"
+  file:
+    name: logs/payment-system.log
+    max-size: 100MB
+    max-history: 30
+    total-size-cap: 10GB
+
+# 管理端点配置
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="SqlDialectMappings">
+    <file url="file://$PROJECT_DIR$/DailySettmentCase/src/settment/changeMobile/file_20260113/changeMobile.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/DailySettmentCase/src/settment/changeMobile/file_20260113/change_mobile_rollback.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/DailySettmentCase/src/settment/changeMobile/file_20260113/change_mobile_select.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/DailySettmentCase/src/settment/changeMobile/file_20260113/change_mobile_update.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/DailySettmentCase/src/settment/changeMobile/file_20260203/changeMobile.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/DailySettmentCase/src/settment/changeMobile/file_20260203/change_mobile_rollback.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/DailySettmentCase/src/settment/changeMobile/file_20260203/change_mobile_select.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/DailySettmentCase/src/settment/changeMobile/file_20260203/change_mobile_update.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/DailySettmentCase/src/settment/changeMobile/file_20260309/changeMobile.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/DailySettmentCase/src/settment/changeMobile/file_20260309/change_mobile_rollback.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/DailySettmentCase/src/settment/changeMobile/file_20260309/change_mobile_select.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/DailySettmentCase/src/settment/changeMobile/file_20260309/change_mobile_update.sql" dialect="GenericSQL" />
+  </component>
+</project>
