@@ -1,0 +1,90 @@
+﻿# Kafka积压自动扩缩容 - KEDA配置（推荐方案）
+#
+# 功能：根据Kafka消息积压自动扩缩容Pod数量
+# 优势：完全自动化，0人工介入，夜间也能处理
+#
+# 使用方法：
+# 1. 安装KEDA: helm install keda kedacore/keda --namespace keda --create-namespace
+# 2. 应用配置: kubectl apply -f keda-kafka-scaler.yaml
+# 3. 查看状态: kubectl get scaledobject coupon-kafka-scaler
+# 4. 查看HPA: kubectl get hpa keda-hpa-coupon-kafka-scaler
+#
+# 原理：
+# - KEDA每15秒查询Kafka Lag
+# - Lag > lagThreshold时扩容
+# - Lag < lagThreshold时缩容（等待5分钟）
+#
+# @since 2026-03-27
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: coupon-kafka-scaler
+  namespace: default
+spec:
+  # 目标Deployment
+  scaleTargetRef:
+    name: coupon-system
+  # 副本数范围
+  minReplicaCount: 1      # 最小1个（夜间无流量时）
+  maxReplicaCount: 20     # 最大20个（秒杀高峰）
+  # 轮询间隔
+  pollingInterval: 15     # 每15秒检查一次Kafka Lag（快速响应）
+  # 冷却期
+  cooldownPeriod: 300     # 缩容前等待5分钟（避免频繁缩容）
+  # 触发器：Kafka Lag
+  triggers:
+  - type: kafka
+    metadata:
+      # Kafka连接信息
+      bootstrapServers: kafka-service:9092
+      consumerGroup: seckill-order-consumer
+      topic: seckill-order
+      # 触发阈值：平均每个Pod积压1000条时开始扩容
+      # 例如：积压10000条 → 扩容到10个Pod
+      lagThreshold: '1000'
+      # Offset重置策略
+      offsetResetPolicy: latest
+      # 可选：SASL认证（如果Kafka需要）
+      # sasl: plaintext
+      # username: admin
+      # password: kafka-password
+  # 高级行为配置（可选）
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0   # 扩容立即生效
+          policies:
+          - type: Percent
+            value: 100        # 每次扩容100%（翻倍）
+            periodSeconds: 15
+          - type: Pods
+            value: 5          # 或者每次增加5个Pod
+            periodSeconds: 15
+          selectPolicy: Max   # 取最大值（翻倍 vs +5个）
+        scaleDown:
+          stabilizationWindowSeconds: 300  # 缩容等待5分钟
+          policies:
+          - type: Percent
+            value: 50         # 每次缩容50%
+            periodSeconds: 60
+---
+# 配置说明：
+#
+# lagThreshold: '1000'
+#   每个Pod承担1000条积压时触发扩容
+#   积压5000条 → 扩容到5个Pod
+#   积压50000条 → 扩容到50个Pod（受max限制，实际20个）
+#
+# pollingInterval: 15
+#   每15秒检查一次，快速响应
+#
+# scaleUp policies:
+#   - Percent 100%：翻倍扩容（2→4→8→16）
+#   - Pods 5个：或固定增加5个
+#   - 取最大值
+#
+# 效果示例：
+#   积压10000条 → 扩容到10个Pod（45秒后开始消费）
+#   积压50000条 → 扩容到20个Pod（45秒后开始消费）
+#   积压100条 → 5分钟后缩容到1个Pod

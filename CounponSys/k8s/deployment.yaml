@@ -1,0 +1,102 @@
+﻿# Coupon System Deployment配置
+# 用途：部署优惠券秒杀系统到K8s
+# @since 2026-03-27
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coupon-system
+  namespace: default
+  labels:
+    app: coupon-system
+    version: v1
+spec:
+  # 初始副本数（KEDA会自动调整）
+  replicas: 2
+  selector:
+    matchLabels:
+      app: coupon-system
+  template:
+    metadata:
+      labels:
+        app: coupon-system
+        version: v1
+    spec:
+      containers:
+      - name: coupon-system
+        image: coupon-system:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8090
+          name: http
+          protocol: TCP
+        # 环境变量
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "prod"
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-service:9092"
+        - name: REDIS_HOST
+          value: "redis-service"
+        - name: DB_URL
+          value: "jdbc:oracle:thin:@oracle-service:1521:ORCL"
+        # 资源限制
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        # 健康检查
+        livenessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8090
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8090
+          initialDelaySeconds: 30
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        # 优雅关闭
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 15"]
+      # Pod终止优雅期
+      terminationGracePeriodSeconds: 30
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: coupon-system
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: coupon-system
+  ports:
+  - port: 8090
+    targetPort: 8090
+    protocol: TCP
+    name: http
+---
+# ConfigMap（可选）
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coupon-system-config
+  namespace: default
+data:
+  application.yml: |
+    spring:
+      kafka:
+        consumer:
+          concurrency: 20

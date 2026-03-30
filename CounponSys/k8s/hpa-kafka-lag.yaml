@@ -1,0 +1,65 @@
+﻿# HPA基于Kafka Lag自动扩缩容（备选方案）
+# 
+# 前提条件：
+# 1. 已部署Prometheus
+# 2. 已部署Prometheus Adapter
+# 3. KafkaLagMonitor已暴露指标
+#
+# 使用：kubectl apply -f hpa-kafka-lag.yaml
+#
+# @since 2026-03-27
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: coupon-system-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: coupon-system
+  # 副本数范围
+  minReplicas: 2
+  maxReplicas: 20
+  # 扩缩容指标
+  metrics:
+  # 指标1：Kafka消费者积压（主要指标）
+  - type: Pods
+    pods:
+      metric:
+        name: kafka_consumer_lag
+        selector:
+          matchLabels:
+            group: seckill-order-consumer
+      target:
+        type: AverageValue
+        averageValue: "5000"  # 每个Pod平均积压5000条时开始扩容
+  # 指标2：CPU使用率（辅助指标）
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  # 扩缩容行为
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 4
+        periodSeconds: 15
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+---
+# 注意：
+# 此方案需要Prometheus Adapter，配置相对复杂
+# 推荐使用KEDA方案（keda-kafka-scaler.yaml）

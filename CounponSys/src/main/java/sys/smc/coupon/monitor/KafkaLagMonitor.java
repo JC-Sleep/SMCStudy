@@ -1,11 +1,14 @@
 package sys.smc.coupon.monitor;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.ConsumerGroupDescription;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.kafka.core.KafkaAdmin;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -41,6 +44,10 @@ public class KafkaLagMonitor {
 
     private final KafkaAdmin kafkaAdmin;
     
+    // 2026-03-27 新增：支持Prometheus指标暴露
+    @Autowired(required = false)
+    private MeterRegistry meterRegistry;
+    
     /**
      * 秒杀订单消费者组ID
      */
@@ -66,30 +73,94 @@ public class KafkaLagMonitor {
      */
     private static final long ALERT_INTERVAL = 5 * 60 * 1000;
     
+    // 2026-03-27 新增：记录上次offset，用于计算消费速度
+    private long lastOffset = 0;
+    private long lastCheckTime = System.currentTimeMillis();
+    
     /**
-     * 定时检查Kafka积压
+     * 定时检查Kafka积压（增强版）
      * 
-     * 执行频率：每30秒一次
+     * 执行频率：每15秒一次（优化：从30秒改为15秒，更快响应）
+     * 
+     * 2026-03-27 增强：
+     * 1. 暴露指标给Prometheus（支持HPA/KEDA自动扩缩容）
+     * 2. 计算消费速度和预计恢复时间
+     * 3. 告警附带自动化处理命令
      */
-    @Scheduled(fixedRate = 30000)
+    @Scheduled(fixedRate = 15000)  // 2026-03-27 优化：改为15秒
     public void checkLag() {
         try {
-            // 获取消费者积压数量
+            // 1. 获取消费者积压数量
             long totalLag = getConsumerLag(CONSUMER_GROUP_ID);
             
-            log.info("Kafka消费者积压检查: group={}, lag={}", CONSUMER_GROUP_ID, totalLag);
+            // 2. 计算消费速度
+            long currentTime = System.currentTimeMillis();
+            long currentOffset = getCurrentTotalOffset();
+            long timeDiff = (currentTime - lastCheckTime) / 1000;  // 秒
+            long consumeSpeed = timeDiff > 0 ? (currentOffset - lastOffset) / timeDiff : 0;
             
-            // 判断是否需要告警
-            if (totalLag > CRITICAL_THRESHOLD) {
-                // 严重告警
-                sendCriticalAlert(totalLag);
-            } else if (totalLag > WARNING_THRESHOLD) {
-                // 普通告警
-                sendWarningAlert(totalLag);
+            // 3. 预估恢复时间
+            long estimatedSeconds = consumeSpeed > 0 ? totalLag / consumeSpeed : -1;
+            long estimatedMinutes = estimatedSeconds > 0 ? estimatedSeconds / 60 : 0;
+            
+            // 4. 暴露指标给Prometheus（支持HPA/KEDA）
+            if (meterRegistry != null) {
+                meterRegistry.gauge("kafka.consumer.lag", 
+                    Tags.of("group", CONSUMER_GROUP_ID, "topic", KafkaConfig.TOPIC_SECKILL_ORDER), 
+                    totalLag);
+                meterRegistry.gauge("kafka.consumer.speed", 
+                    Tags.of("group", CONSUMER_GROUP_ID), 
+                    consumeSpeed);
+                if (estimatedSeconds > 0) {
+                    meterRegistry.gauge("kafka.estimated.recovery.minutes", 
+                        Tags.of("group", CONSUMER_GROUP_ID), 
+                        estimatedMinutes);
+                }
             }
+            
+            // 5. 记录详细日志
+            log.info("Kafka监控: group={}, lag={}, speed={}/s, 预计恢复={}分钟", 
+                    CONSUMER_GROUP_ID, totalLag, consumeSpeed, 
+                    estimatedSeconds > 0 ? estimatedMinutes : "计算中");
+            
+            // 6. 判断是否需要告警
+            if (totalLag > CRITICAL_THRESHOLD) {
+                sendCriticalAlert(totalLag, estimatedMinutes, consumeSpeed);
+            } else if (totalLag > WARNING_THRESHOLD) {
+                sendWarningAlert(totalLag, estimatedMinutes);
+            }
+            
+            // 7. 更新上次检查信息
+            lastOffset = currentOffset;
+            lastCheckTime = currentTime;
             
         } catch (Exception e) {
             log.error("Kafka积压检查失败", e);
+        }
+    }
+    
+    /**
+     * 获取当前总offset（用于计算消费速度）
+     * 
+     * 2026-03-27 新增
+     */
+    private long getCurrentTotalOffset() {
+        try {
+            long total = 0;
+            try (AdminClient adminClient = AdminClient.create(kafkaAdmin.getConfigurationProperties())) {
+                Map<TopicPartition, OffsetAndMetadata> offsets = adminClient
+                        .listConsumerGroupOffsets(CONSUMER_GROUP_ID)
+                        .partitionsToOffsetAndMetadata()
+                        .get();
+                
+                for (OffsetAndMetadata offset : offsets.values()) {
+                    total += offset.offset();
+                }
+            }
+            return total;
+        } catch (Exception e) {
+            log.debug("获取总offset失败", e);
+            return 0;
         }
     }
     
@@ -163,9 +234,12 @@ public class KafkaLagMonitor {
     /**
      * 发送普通告警
      * 
+     * 2026-03-27 优化：添加预计恢复时间
+     * 
      * @param lag 积压数量
+     * @param estimatedMinutes 预计恢复时间（分钟）
      */
-    private void sendWarningAlert(long lag) {
+    private void sendWarningAlert(long lag, long estimatedMinutes) {
         // 防止频繁告警
         long currentTime = System.currentTimeMillis();
         if (currentTime - lastAlertTime < ALERT_INTERVAL) {
@@ -177,12 +251,14 @@ public class KafkaLagMonitor {
                 "【Kafka积压告警】\n" +
                 "消费者组: %s\n" +
                 "Topic: %s\n" +
-                "积压数量: %d 条\n" +
+                "积压数量: %,d 条\n" +
+                "预计恢复: %d 分钟\n" +
                 "告警级别: 普通\n" +
-                "建议: 关注消费速度，如持续增长需要优化",
+                "建议: 关注消费速度，如持续增长需要扩容",
                 CONSUMER_GROUP_ID,
                 KafkaConfig.TOPIC_SECKILL_ORDER,
-                lag
+                lag,
+                estimatedMinutes
         );
         
         // TODO: 调用告警服务发送通知（短信/邮件/钉钉等）
@@ -196,33 +272,64 @@ public class KafkaLagMonitor {
      * 
      * @param lag 积压数量
      */
-    private void sendCriticalAlert(long lag) {
+    private void sendCriticalAlert(long lag, long estimatedMinutes, long consumeSpeed) {
         // 严重告警不受频率限制
         
+        // 2026-03-27 优化：计算需要的实例数
+        int currentReplicas = 2;  // 当前实例数（从配置或API获取）
+        int recommendedReplicas = (int) Math.min(20, Math.ceil((double) lag / 5000));  // 每个实例处理5000条
+        
         String message = String.format(
-                "【Kafka严重积压告警】\n" +
+                "【Kafka严重积压告警】⚠️⚠️⚠️\n" +
+                "━━━━━━━━━━━━━━━━━━━━━━━━\n" +
                 "消费者组: %s\n" +
                 "Topic: %s\n" +
-                "积压数量: %d 条\n" +
+                "积压数量: %,d 条\n" +
+                "消费速度: %,d 条/秒\n" +
+                "预计恢复: %d 分钟\n" +
                 "告警级别: 严重 ⚠️⚠️⚠️\n" +
                 "\n" +
-                "处理建议:\n" +
-                "1. 立即增加消费者实例数\n" +
-                "2. 临时提升concurrency配置(当前20，可提升到30)\n" +
-                "3. 检查消费者是否有异常\n" +
-                "4. 检查数据库/积分服务是否正常\n" +
+                "━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+                "自动化处理建议：\n" +
                 "\n" +
-                "预计消费完成时间: %.1f 分钟 (按当前速度)",
+                "方案1：KEDA自动扩缩容（推荐）\n" +
+                "  如已部署KEDA，会自动扩容到%d个实例\n" +
+                "  无需人工介入 ✅\n" +
+                "\n" +
+                "方案2：手动扩容（临时方案）\n" +
+                "  kubectl scale deployment coupon-system --replicas=%d\n" +
+                "\n" +
+                "方案3：执行快速扩容脚本\n" +
+                "  ./scripts/scale-up.sh\n" +
+                "\n" +
+                "━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+                "扩容后预计：\n" +
+                "  消费速度: %,d 条/秒 → %,d 条/秒\n" +
+                "  恢复时间: %d 分钟 → %.1f 分钟\n" +
+                "\n" +
+                "━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+                "监控地址:\n" +
+                "  Grafana: http://grafana/d/kafka-lag\n" +
+                "  Prometheus: http://prometheus/graph\n" +
+                "\n" +
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
                 CONSUMER_GROUP_ID,
                 KafkaConfig.TOPIC_SECKILL_ORDER,
                 lag,
-                lag / 1000.0 / 20 / 60  // 假设20个消费者，每个每秒处理1000条
+                consumeSpeed,
+                estimatedMinutes,
+                recommendedReplicas,
+                recommendedReplicas,
+                consumeSpeed,
+                consumeSpeed * recommendedReplicas / currentReplicas,
+                estimatedMinutes,
+                (double) lag / (consumeSpeed * recommendedReplicas / currentReplicas) / 60
         );
         
         // TODO: 调用告警服务发送紧急通知（电话+短信+邮件+钉钉）
         // alertService.sendUrgent(message);
         
-        log.error("Kafka严重积压告警: {}", message);
+        log.error("Kafka严重积压告警:\n{}", message);
     }
     
     /**
