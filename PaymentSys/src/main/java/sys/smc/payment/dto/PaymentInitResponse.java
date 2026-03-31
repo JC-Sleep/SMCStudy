@@ -34,6 +34,16 @@ public class PaymentInitResponse implements Serializable {
     private String status;
 
     /**
+     * 支付渠道代码
+     */
+    private String channel;
+
+    /**
+     * 支付渠道名称
+     */
+    private String channelName;
+
+    /**
      * 过期时间
      */
     private String expiryTime;
@@ -43,4 +53,3 @@ public class PaymentInitResponse implements Serializable {
      */
     private String errorMessage;
 }
-

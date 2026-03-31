@@ -45,7 +45,9 @@ mybatis-plus:
       logic-not-delete-value: 0
     banner: false
 
-# 支付网关配置
+# ==================== 支付网关配置 ====================
+
+# 渣打银行配置
 scb:
   api:
     endpoint: ${SCB_API_ENDPOINT:https://api.standardchartered.com/payment}
@@ -58,7 +60,36 @@ scb:
       max: 5
       delay: 5000
 
-# 对账配置
+# 支付宝配置
+alipay:
+  gateway:
+    url: ${ALIPAY_GATEWAY_URL:https://openapi.alipay.com/gateway.do}
+  app:
+    id: ${ALIPAY_APP_ID:}
+  merchant:
+    private:
+      key: ${ALIPAY_MERCHANT_PRIVATE_KEY:}
+  public:
+    key: ${ALIPAY_PUBLIC_KEY:}
+  sign:
+    type: RSA2
+
+# 建设银行配置
+ccb:
+  api:
+    endpoint: ${CCB_API_ENDPOINT:https://ibsbjstar.ccb.com.cn/CCBIS/B2CMainPlat_00_LINKAGE}
+  merchant:
+    id: ${CCB_MERCHANT_ID:}
+    key: ${CCB_MERCHANT_KEY:}
+  pos:
+    id: ${CCB_POS_ID:}
+  branch:
+    id: ${CCB_BRANCH_ID:}
+  pub:
+    key: ${CCB_PUB_KEY:}
+
+# ==================== 对账与回调配置 ====================
+
 payment:
   reconciliation:
     cron: "0 */30 * * * ?"  # 每30分钟执行一次
@@ -66,7 +97,7 @@ payment:
   timeout:
     threshold: 300  # 5分钟
   callback:
-    url: ${CALLBACK_BASE_URL:http://localhost:8080}/api/payment/callback/standard-chartered
+    url: ${CALLBACK_BASE_URL:http://localhost:8080}
 
 # 服务器配置
 server:
@@ -103,4 +134,3 @@ management:
   endpoint:
     health:
       show-details: when-authorized
-

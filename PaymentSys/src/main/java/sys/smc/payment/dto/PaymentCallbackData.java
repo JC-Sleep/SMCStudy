@@ -4,9 +4,11 @@ import lombok.Data;
 
 import java.io.Serializable;
 import java.math.BigDecimal;
+import java.util.Date;
 
 /**
- * 回调数据
+ * 回调数据（统一格式）
+ * 各渠道回调解析后转换为此统一格式
  */
 @Data
 public class PaymentCallbackData implements Serializable {
@@ -19,7 +21,7 @@ public class PaymentCallbackData implements Serializable {
     private String merchantId;
 
     /**
-     * 银行交易ID
+     * 银行/网关交易ID
      */
     private String gatewayTransactionId;
 
@@ -39,14 +41,14 @@ public class PaymentCallbackData implements Serializable {
     private String currency;
 
     /**
-     * 支付状态
+     * 支付状态（统一映射后的状态）
      */
     private String paymentStatus;
 
     /**
-     * 支付时间
+     * 支付时间（Date类型）
      */
-    private String paymentTime;
+    private Date paymentTime;
 
     /**
      * 支付方式
@@ -57,5 +59,14 @@ public class PaymentCallbackData implements Serializable {
      * 卡号后4位
      */
     private String cardLast4;
-}
 
+    /**
+     * 原始回调数据（用于审计）
+     */
+    private String rawData;
+
+    /**
+     * 渠道特有的额外数据（JSON格式）
+     */
+    private String extraData;
+}
