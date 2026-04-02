@@ -30,6 +30,20 @@ spring:
         size: 5
         thread-name-prefix: payment-scheduled-
 
+  # Redis配置（可选 - 用于分布式幂等性）
+  redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:}
+    database: ${REDIS_DATABASE:0}
+    timeout: 6000ms
+    lettuce:
+      pool:
+        max-active: 50
+        max-idle: 20
+        min-idle: 5
+        max-wait: 3000ms
+
 # MyBatis-Plus 配置
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
@@ -98,6 +112,12 @@ payment:
     threshold: 300  # 5分钟
   callback:
     url: ${CALLBACK_BASE_URL:http://localhost:8080}
+    dedup:
+      expire: 86400  # 回调去重过期时间（秒），默认24小时
+  idempotency:
+    lock:
+      wait-time: 5   # 分布式锁等待时间（秒）
+      lease-time: 30 # 分布式锁持有时间（秒）
 
 # 服务器配置
 server:

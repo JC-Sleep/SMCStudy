@@ -74,5 +74,14 @@ public class PaymentInitRequest implements Serializable {
      * 会话ID
      */
     private String sid;
-}
 
+    /**
+     * 幂等性Token（推荐由前端生成UUID传入）
+     * 用于分布式环境下防止重复提交
+     *
+     * 示例：
+     * - 前端生成：uuid.v4() 或 Date.now() + Math.random()
+     * - 如果不传，后端会使用订单号+支付方式作为幂等键
+     */
+    private String idempotencyToken;
+}
