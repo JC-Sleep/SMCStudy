@@ -6,7 +6,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import sys.smc.payment.enums.PaymentChannel;
-import sys.smc.payment.service.PaymentCallbackService;
+import sys.smc.payment.service.PaymentCallbackServiceEnhanced;
 
 import javax.servlet.http.HttpServletRequest;
 import java.util.Map;
@@ -14,14 +14,17 @@ import java.util.Map;
 /**
  * 支付回调控制器
  * 支持多渠道回调：渣打银行、支付宝、建设银行等
+ *
+ * 修复：注入增强版回调服务（含Redis去重），废弃基础版
  */
 @RestController
 @RequestMapping("/api/payment/callback")
 @Slf4j
 public class PaymentCallbackController {
 
+    /** ⭐ 使用增强版：含 Redis去重 + 终态检查 + 乐观锁三层防护 */
     @Autowired
-    private PaymentCallbackService callbackService;
+    private PaymentCallbackServiceEnhanced callbackService;
 
     /**
      * 通用回调处理器

@@ -253,10 +253,20 @@ public class PaymentServiceEnhanced {
     }
 
     /**
-     * 退款
+     * 退款（防重复退款版本）
+     *
+     * 核心防重原理（三步走）：
+     *  Step1: 用乐观锁原子性地把状态从 SUCCESS → REFUNDING
+     *         只有第一个线程能成功（影响行数=1），后续线程拿到0行直接报错
+     *  Step2: 凭独占权调用银行网关
+     *  Step3: 根据网关结果更新为 REFUNDED 或 REFUND_FAILED
+     *
+     * 不再出现两个线程都通过"状态=SUCCESS"检查后双重调用网关的问题
      */
     @Transactional(rollbackFor = Exception.class)
     public GatewayRefundResponse refund(RefundRequest request) {
+
+        // ── Step 0：查询原交易 ────────────────────────────────────────────
         PaymentTransaction transaction = transactionMapper.selectOne(
             new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<PaymentTransaction>()
                 .eq(PaymentTransaction::getTransactionId, request.getTransactionId())
@@ -266,26 +276,75 @@ public class PaymentServiceEnhanced {
             throw new PaymentException("原交易不存在");
         }
 
+        // 退款中/已退款/失败等非SUCCESS状态，直接拒绝
         if (!PaymentStatus.SUCCESS.name().equals(transaction.getPaymentStatus())) {
-            throw new PaymentException("只有支付成功的交易才能退款");
+            throw new PaymentException("当前状态不允许退款，状态：" + transaction.getPaymentStatus());
         }
 
+        // ── Step 1：原子抢占退款权（SUCCESS → REFUNDING），乐观锁保护 ─────
+        // MyBatis-Plus 翻译为：
+        //   UPDATE PAYMENT_TRANSACTION
+        //     SET STATUS='REFUNDING', VERSION=VERSION+1, UPDATE_TIME=now()
+        //   WHERE ID=? AND VERSION=?     ← version不匹配→0行→并发退款被拦截
+        PaymentTransaction claimUpdate = new PaymentTransaction();
+        claimUpdate.setId(transaction.getId());
+        claimUpdate.setVersion(transaction.getVersion());          // 乐观锁关键字段
+        claimUpdate.setPreviousStatus(transaction.getPaymentStatus());
+        claimUpdate.setPaymentStatus(PaymentStatus.REFUNDING.name());
+        claimUpdate.setStatusUpdateTime(new Date());
+        claimUpdate.setUpdateUser(request.getOperator() != null ? request.getOperator() : "SYSTEM");
+
+        int claimed = transactionMapper.updateById(claimUpdate);
+        if (claimed == 0) {
+            // 另一个线程已经抢先把状态改掉（可能是并发退款，也可能是被其他操作修改）
+            log.warn("退款抢占失败（版本冲突），交易ID：{}，当前VERSION：{}",
+                transaction.getTransactionId(), transaction.getVersion());
+            throw new PaymentException("退款正在处理中，请勿重复提交");
+        }
+
+        log.info("退款权抢占成功，交易ID：{}，状态已变更为REFUNDING", transaction.getTransactionId());
+
+        // ── Step 2：调用银行网关（此刻状态=REFUNDING，其他线程已不可进入）──
         PaymentChannel channel = PaymentChannel.fromCode(transaction.getGatewayName());
         PaymentGateway gateway = gatewayRouter.getGateway(channel);
 
         request.setGatewayTransactionId(transaction.getGatewayTransactionId());
         request.setRefundNo("RF" + IdUtil.getSnowflakeNextIdStr());
 
-        GatewayRefundResponse response = gateway.refund(request);
+        try {
+            GatewayRefundResponse response = gateway.refund(request);
 
-        if (response.isSuccess()) {
-            transaction.setPreviousStatus(transaction.getPaymentStatus());
-            transaction.setPaymentStatus(PaymentStatus.REFUNDED.name());
-            transaction.setStatusUpdateTime(new Date());
-            transactionMapper.updateById(transaction);
+            // ── Step 3a：网关成功 → REFUNDED ──────────────────────────────
+            PaymentTransaction finalUpdate = new PaymentTransaction();
+            finalUpdate.setId(transaction.getId());
+            // 不设置version → MyBatis-Plus不加version条件 → 直接更新（此时已是REFUNDING的独占状态）
+            if (response.isSuccess()) {
+                finalUpdate.setPaymentStatus(PaymentStatus.REFUNDED.name());
+                log.info("退款成功，交易ID：{}，退款单号：{}", transaction.getTransactionId(), request.getRefundNo());
+            } else {
+                // ── Step 3b：网关业务失败（如余额不足等）→ REFUND_FAILED ────
+                finalUpdate.setPaymentStatus(PaymentStatus.REFUND_FAILED.name());
+                finalUpdate.setErrorMessage("网关退款失败：" + response.getMessage());
+                log.error("退款网关返回失败，交易ID：{}，原因：{}", transaction.getTransactionId(), response.getMessage());
+            }
+            finalUpdate.setStatusUpdateTime(new Date());
+            finalUpdate.setUpdateUser(request.getOperator() != null ? request.getOperator() : "SYSTEM");
+            transactionMapper.updateById(finalUpdate);
+
+            return response;
+
+        } catch (Exception e) {
+            // ── Step 3c：网关调用异常（超时/网络）→ REFUND_FAILED，需人工干预 ──
+            log.error("退款网关调用异常，交易ID：{}，需人工核查", transaction.getTransactionId(), e);
+            PaymentTransaction failUpdate = new PaymentTransaction();
+            failUpdate.setId(transaction.getId());
+            failUpdate.setPaymentStatus(PaymentStatus.REFUND_FAILED.name());
+            failUpdate.setErrorMessage("网关异常：" + e.getMessage() + "，请人工核查");
+            failUpdate.setStatusUpdateTime(new Date());
+            failUpdate.setUpdateUser("SYSTEM");
+            transactionMapper.updateById(failUpdate);
+            throw new PaymentException("退款网关异常，已标记为REFUND_FAILED，请联系运营处理", e);
         }
-
-        return response;
     }
 
     /**

@@ -36,6 +36,16 @@ public enum PaymentStatus {
     RECONCILING("对账中"),
 
     /**
+     * 退款处理中（中间状态，防止并发重复退款）
+     */
+    REFUNDING("退款处理中"),
+
+    /**
+     * 退款失败（需人工干预）
+     */
+    REFUND_FAILED("退款失败"),
+
+    /**
      * 已退款
      */
     REFUNDED("已退款");
