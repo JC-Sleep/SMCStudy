@@ -194,12 +194,65 @@ public class PaymentCallbackServiceEnhanced {
     }
 
     /**
-     * 通知订单系统
+     * 通知订单系统（支付成功后的下游触发）
+     *
+     * ╔══════════════════════════════════════════════════════════════════╗
+     * ║  ⚠️  BUG-3：此方法是空的 TODO，支付成功后订单系统永远不知道        ║
+     * ║                                                                  ║
+     * ║  触发条件：任何一笔支付成功，银行回调到达并处理完毕后              ║
+     * ║           即 callbackData.paymentStatus == "SUCCESS"             ║
+     * ║                                                                  ║
+     * ║  问题时序（每笔成功支付都会触发）：                               ║
+     * ║   T1  用户完成银行页面付款                                        ║
+     * ║   T2  银行发送回调 → 我方收到                                    ║
+     * ║   T3  签名验证 ✅ → 状态更新为 SUCCESS ✅                        ║
+     * ║   T4  调用 notifyOrderSystem() → 只打一行 log，什么都没做         ║
+     * ║   T5  订单系统：ORDER_001 状态永远是 UNPAID                       ║
+     * ║   T6  仓库系统：不知道要备货，不发货                              ║
+     * ║   T7  用户：已付款，等货等了3天，投诉                             ║
+     * ║   T8  客服：查支付记录显示 SUCCESS，查订单显示 UNPAID，            ║
+     * ║             两边对不上，需要人工处理                              ║
+     * ║   T9  财务：退款也退不了（支付成功了），又不敢发货（未付款）        ║
+     * ║             运营噩梦！                                            ║
+     * ║                                                                  ║
+     * ║  危害等级：🔴 高危，每笔成功订单都受影响                           ║
+     * ║                                                                  ║
+     * ║  根治方案（Saga + 本地消息表，见分布式事务文档）：                  ║
+     * ║   ① 在支付状态更新和消息写入放在同一个本地事务                     ║
+     * ║      UPDATE PAYMENT_TRANSACTION SET STATUS='SUCCESS'             ║
+     * ║      INSERT INTO MESSAGE_OUTBOX (type='PAYMENT_SUCCESS', ...)   ║
+     * ║      ← 原子提交，要么都成功，要么都回滚                           ║
+     * ║   ② 定时任务扫描 PENDING 消息投递 MQ                             ║
+     * ║   ③ 订单服务幂等消费，更新订单状态                                ║
+     * ║                                                                  ║
+     * ║  临时兜底方案（先用着，尽快替换为MQ方案）：                        ║
+     * ║   同步 HTTP 调用订单系统（有超时风险，但总比没有强）               ║
+     * ╚══════════════════════════════════════════════════════════════════╝
+     *
+     * TODO ❌ 生产上线前必须实现此方法，否则每笔成功支付订单都不会发货！
      */
     private void notifyOrderSystem(PaymentTransaction transaction) {
-        // TODO: 实现订单系统通知逻辑
-        log.info("通知订单系统，订单号：{}，支付状态：{}", 
-            transaction.getOrderReference(), transaction.getPaymentStatus());
+        // ── 临时兜底（未接MQ前）：记录到待处理表，人工/定时任务补偿 ──────
+        // 至少先把"已支付但未通知订单系统"的记录留下来，不要静默丢失
+        log.warn("【Bug3-待修复】支付成功但订单通知未实现！" +
+                 "订单号={}，交易ID={}，金额={}，请尽快处理或人工介入！",
+                 transaction.getOrderReference(),
+                 transaction.getTransactionId(),
+                 transaction.getAmount());
+
+        // TODO STEP-1：接入消息队列（推荐 RocketMQ / Kafka）
+        // mqTemplate.send("payment-success-topic", buildPaymentSuccessEvent(transaction));
+
+        // TODO STEP-2：或者同步调用订单系统 HTTP 接口（临时方案，有超时风险）
+        // orderServiceClient.confirmPayment(transaction.getOrderReference(), transaction.getTransactionId());
+
+        // TODO STEP-3：最终方案 - 本地消息表（Saga 最终一致性）
+        // messageOutboxMapper.insert(MessageOutbox.builder()
+        //     .msgType("PAYMENT_SUCCESS")
+        //     .payload(JSON.toJSONString(transaction))
+        //     .status("PENDING")
+        //     .createTime(new Date())
+        //     .build());
     }
 
     /**
