@@ -1,5 +1,6 @@
 package sys.smc.payment.service;
 
+import cn.hutool.core.lang.Snowflake;
 import cn.hutool.core.util.IdUtil;
 import com.alibaba.fastjson.JSON;
 import lombok.extern.slf4j.Slf4j;
@@ -50,6 +51,10 @@ public class PaymentCallbackServiceEnhanced {
     @Autowired(required = false)
     private RedisTemplate<String, Object> redisTemplate;
 
+    // ② 修复：注入 workerId 配置好的 Snowflake bean
+    @Autowired
+    private Snowflake snowflake;
+
     @Value("${payment.callback.dedup.expire:86400}")
     private Long callbackDedupExpire; // 回调去重过期时间（秒），默认24小时
 
@@ -66,7 +71,7 @@ public class PaymentCallbackServiceEnhanced {
                                  String clientIp, PaymentChannel channel) {
         long startTime = System.currentTimeMillis();
         PaymentCallbackLog callbackLog = new PaymentCallbackLog();
-        callbackLog.setId(Long.valueOf(IdUtil.getSnowflakeNextIdStr()));
+        callbackLog.setId(snowflake.nextId());
 
         try {
             log.info("开始处理 {} 回调，IP：{}", channel.getName(), clientIp);

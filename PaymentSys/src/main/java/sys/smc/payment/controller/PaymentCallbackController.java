@@ -1,8 +1,10 @@
 package sys.smc.payment.controller;
 
 import cn.hutool.core.util.StrUtil;
+import com.google.common.util.concurrent.RateLimiter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import sys.smc.payment.enums.PaymentChannel;
@@ -16,6 +18,7 @@ import java.util.Map;
  * 支持多渠道回调：渣打银行、支付宝、建设银行等
  *
  * 修复：注入增强版回调服务（含Redis去重），废弃基础版
+ * ⑩ 修复：增加回调限流，防止银行重试风暴打穿 DB
  */
 @RestController
 @RequestMapping("/api/payment/callback")
@@ -26,9 +29,15 @@ public class PaymentCallbackController {
     @Autowired
     private PaymentCallbackServiceEnhanced callbackService;
 
+    // ⑩ 回调限流（银行可能重发，需要适当限速）
+    @Autowired
+    @Qualifier("callbackRateLimiter")
+    private RateLimiter callbackRateLimiter;
+
     /**
      * 通用回调处理器
      * 根据渠道路径自动路由到对应处理逻辑
+     * ⑩ 限流：超过阈值时仍返回 200（告诉银行"收到了"，避免无限重发）
      */
     @PostMapping("/{channel}")
     public ResponseEntity<String> handleCallback(
@@ -39,6 +48,13 @@ public class PaymentCallbackController {
 
         long startTime = System.currentTimeMillis();
         String clientIp = getClientIp(request);
+
+        // ⑩ 限流检查：超限时返回200但不处理
+        // 注意：必须返回200，否则银行会认为失败并重试，加剧问题
+        if (!callbackRateLimiter.tryAcquire()) {
+            log.warn("回调限流触发，渠道：{}，IP：{}", channel, clientIp);
+            return ResponseEntity.ok("RECEIVED"); // 返回200，防止银行重发
+        }
 
         log.info("收到 {} 回调，IP：{}，Header数量：{}", channel, clientIp, headers.size());
 

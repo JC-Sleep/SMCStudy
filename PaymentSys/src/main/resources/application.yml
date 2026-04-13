@@ -2,10 +2,10 @@ spring:
   application:
     name: payment-system
 
-  # 数据源配置
+  # ③ 数据源配置 - 连接地址必须通过环境变量注入，不能写死 localhost
   datasource:
     driver-class-name: oracle.jdbc.OracleDriver
-    url: jdbc:oracle:thin:@localhost:1521:ORCL
+    url: jdbc:oracle:thin:@${DB_HOST:localhost}:${DB_PORT:1521}:${DB_SID:ORCL}
     username: ${DB_USERNAME:payment_user}
     password: ${DB_PASSWORD:payment_pass}
     hikari:
@@ -30,8 +30,11 @@ spring:
         size: 5
         thread-name-prefix: payment-scheduled-
 
-  # Redis配置（可选 - 用于分布式幂等性）
+  # ⑥ Redis配置 - 支持单机和 Sentinel 两种模式
+  # 单机模式（开发/测试）：设置 REDIS_MODE=single（或不设置）
+  # Sentinel模式（生产）：设置 REDIS_MODE=sentinel，并配置 REDIS_SENTINEL_NODES
   redis:
+    # 单机模式连接（REDIS_MODE=single 时生效）
     host: ${REDIS_HOST:localhost}
     port: ${REDIS_PORT:6379}
     password: ${REDIS_PASSWORD:}
@@ -43,6 +46,10 @@ spring:
         max-idle: 20
         min-idle: 5
         max-wait: 3000ms
+      # Sentinel 模式（生产推荐）：取消注释并配置环境变量
+      # sentinel:
+      #   master: ${REDIS_SENTINEL_MASTER:mymaster}
+      #   nodes: ${REDIS_SENTINEL_NODES:192.168.1.21:26379,192.168.1.22:26379,192.168.1.23:26379}
 
 # MyBatis-Plus 配置
 mybatis-plus:
@@ -61,7 +68,6 @@ mybatis-plus:
 
 # ==================== 支付网关配置 ====================
 
-# 渣打银行配置
 scb:
   api:
     endpoint: ${SCB_API_ENDPOINT:https://api.standardchartered.com/payment}
@@ -74,7 +80,6 @@ scb:
       max: 5
       delay: 5000
 
-# 支付宝配置
 alipay:
   gateway:
     url: ${ALIPAY_GATEWAY_URL:https://openapi.alipay.com/gateway.do}
@@ -88,7 +93,6 @@ alipay:
   sign:
     type: RSA2
 
-# 建设银行配置
 ccb:
   api:
     endpoint: ${CCB_API_ENDPOINT:https://ibsbjstar.ccb.com.cn/CCBIS/B2CMainPlat_00_LINKAGE}
@@ -106,51 +110,92 @@ ccb:
 
 payment:
   reconciliation:
-    cron: "0 */30 * * * ?"  # 每30分钟执行一次
-    daily-cron: "0 0 3 * * ?"  # 每天凌晨3点执行全量对账
+    cron: "0 */30 * * * ?"
+    daily-cron: "0 0 3 * * ?"
   timeout:
-    threshold: 300  # 5分钟
+    threshold: 300
   callback:
     url: ${CALLBACK_BASE_URL:http://localhost:8080}
     dedup:
-      expire: 86400  # 回调去重过期时间（秒），默认24小时
+      expire: 86400
   idempotency:
     lock:
-      wait-time: 5   # 分布式锁等待时间（秒）
-      lease-time: 30 # 分布式锁持有时间（秒）
+      wait-time: 5
+      lease-time: 30
+  # ⑩ 限流配置（Guava RateLimiter）
+  rate-limiter:
+    payment-qps: ${PAYMENT_RATE_QPS:100}       # 支付发起：每秒最多100笔（按服务器实际调整）
+    callback-qps: ${CALLBACK_RATE_QPS:300}     # 回调处理：每秒最多300次
+    query-qps: ${QUERY_RATE_QPS:500}           # 状态查询：每秒最多500次
+
+# ② Snowflake ID 配置 - 三个实例必须设置不同的 worker-id
+# 实例A：-DSNOWFLAKE_WORKER_ID=1 -DSNOWFLAKE_DC_ID=1
+# 实例B：-DSNOWFLAKE_WORKER_ID=2 -DSNOWFLAKE_DC_ID=1
+# 实例C：-DSNOWFLAKE_WORKER_ID=3 -DSNOWFLAKE_DC_ID=1
+snowflake:
+  worker-id: ${SNOWFLAKE_WORKER_ID:0}        # 必须每实例不同！默认0仅用于单机开发
+  datacenter-id: ${SNOWFLAKE_DC_ID:0}
+
+# ⑤ Resilience4j 熔断器配置
+resilience4j:
+  circuitbreaker:
+    instances:
+      payment-gateway:
+        # 滑动窗口：最近10次调用
+        sliding-window-size: 10
+        # 失败率超过50%触发熔断（即10次中5次失败）
+        failure-rate-threshold: 50
+        # 慢调用（超过3秒）也算失败
+        slow-call-duration-threshold: 3s
+        slow-call-rate-threshold: 80
+        # 熔断后等待10秒再尝试半开放
+        wait-duration-in-open-state: 10s
+        # 半开放状态允许3次试探请求
+        permitted-number-of-calls-in-half-open-state: 3
+        # 记录哪些异常触发熔断
+        record-exceptions:
+          - sys.smc.payment.exception.GatewayException
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+  timelimiter:
+    instances:
+      payment-gateway:
+        # 单次银行API最多等待10秒（原来是120秒！）
+        timeout-duration: 10s
+        cancel-running-future: true
 
 # 服务器配置
 server:
-  port: 8080
+  port: ${SERVER_PORT:8080}
   servlet:
     context-path: /
   tomcat:
     max-threads: 200
     accept-count: 100
 
-# 日志配置
+# ⑨ 日志配置 - 生产环境用 INFO，不用 DEBUG
 logging:
   level:
     root: INFO
-    sys.smc.payment: DEBUG
-    com.baomidou.mybatisplus: INFO
-    org.springframework.web: INFO
-    org.springframework.scheduling: INFO
+    sys.smc.payment: ${LOG_LEVEL:INFO}         # 生产：INFO，调试：DEBUG
+    com.baomidou.mybatisplus: WARN
+    org.springframework.web: WARN
+    io.github.resilience4j: INFO
   pattern:
-    console: "%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(${LOG_LEVEL_PATTERN:%5p}) %clr(${PID:- }){magenta} %clr(---){faint} %clr([%15.15t]){faint} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n${LOG_EXCEPTION_CONVERSION_WORD:%wEx}"
-    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n"
+    # 增加实例ID（INSTANCE_ID env var），方便区分三个实例的日志
+    console: "%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(%-5p) [${INSTANCE_ID:inst-?}] %clr(---){faint} %clr([%15.15t]){faint} %clr(%-40.40logger{39}){cyan} : %m%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [${INSTANCE_ID:inst-?}] [%thread] %-5level %logger{50} - %msg%n"
   file:
-    name: logs/payment-system.log
+    name: ${LOG_DIR:logs}/payment-system.log
     max-size: 100MB
     max-history: 30
     total-size-cap: 10GB
 
-# 管理端点配置
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,circuitbreakers
   endpoint:
     health:
       show-details: when-authorized

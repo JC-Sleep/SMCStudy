@@ -1,6 +1,7 @@
 package sys.smc.payment.service;
 
 import cn.hutool.core.date.DateUtil;
+import cn.hutool.core.lang.Snowflake;
 import cn.hutool.core.util.IdUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
@@ -53,10 +54,13 @@ public class PaymentServiceEnhanced {
 
     /**
      * 编程式事务模板（Bug2修复用）
-     * 用于在Redis锁内部精确控制事务提交时机，确保事务在锁释放前提交
      */
     @Autowired
     private TransactionTemplate transactionTemplate;
+
+    // ② 修复：注入配置好 workerId 的 Snowflake bean
+    @Autowired
+    private Snowflake snowflake;
 
     @Value("${payment.timeout.threshold:300}")
     private Integer timeoutThreshold;
@@ -392,7 +396,7 @@ public class PaymentServiceEnhanced {
         PaymentGateway gateway = gatewayRouter.getGateway(channel);
 
         request.setGatewayTransactionId(transaction.getGatewayTransactionId());
-        request.setRefundNo("RF" + IdUtil.getSnowflakeNextIdStr());
+        request.setRefundNo("RF" + snowflake.nextIdStr());
 
         try {
             GatewayRefundResponse response = gateway.refund(request);
@@ -437,7 +441,7 @@ public class PaymentServiceEnhanced {
                                                  String idempotencyKey, 
                                                  PaymentChannel channel) {
         PaymentTransaction transaction = new PaymentTransaction();
-        transaction.setTransactionId("TXN" + IdUtil.getSnowflakeNextIdStr());
+        transaction.setTransactionId("TXN" + snowflake.nextIdStr());
         transaction.setIdempotencyKey(idempotencyKey);
         transaction.setOrderReference(request.getOrderReference());
         transaction.setUserId(request.getUserId());
@@ -473,7 +477,7 @@ public class PaymentServiceEnhanced {
      * 获取下一个ID
      */
     private Long getNextId() {
-        return Long.valueOf(IdUtil.getSnowflakeNextIdStr());
+        return snowflake.nextId();
     }
 }
 
