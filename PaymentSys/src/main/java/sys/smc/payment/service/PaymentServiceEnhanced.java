@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import sys.smc.payment.dto.PaymentInitRequest;
 import sys.smc.payment.dto.PaymentInitResponse;
 import sys.smc.payment.dto.RefundRequest;
@@ -50,6 +51,13 @@ public class PaymentServiceEnhanced {
     @Autowired(required = false)
     private RedisTemplate<String, Object> redisTemplate;
 
+    /**
+     * 编程式事务模板（Bug2修复用）
+     * 用于在Redis锁内部精确控制事务提交时机，确保事务在锁释放前提交
+     */
+    @Autowired
+    private TransactionTemplate transactionTemplate;
+
     @Value("${payment.timeout.threshold:300}")
     private Integer timeoutThreshold;
 
@@ -61,8 +69,35 @@ public class PaymentServiceEnhanced {
 
     /**
      * 发起支付（增强版 - 支持分布式幂等性）
+     *
+     * ╔══════════════════════════════════════════════════════════════════╗
+     * ║  ⚠️  BUG-2 修复记录（已修复）                                    ║
+     * ║  原代码在这里有 @Transactional，导致事务范围包住了 Redis 锁        ║
+     * ║                                                                  ║
+     * ║  触发条件：高并发 + Redis可用 + paymentMethod不为null             ║
+     * ║                                                                  ║
+     * ║  问题时序：                                                       ║
+     * ║   T1  线程A：@Transactional 开启事务                             ║
+     * ║   T2  线程A：获取 Redis 锁成功                                   ║
+     * ║   T3  线程A：双重检查 SELECT → 不存在 ✅                         ║
+     * ║   T4  线程A：INSERT 交易记录（事务未提交！）                       ║
+     * ║   T5  线程A：finally → lock.unlock()  ← 锁释放了                 ║
+     * ║   T6  线程B：获取 Redis 锁成功（A刚释放）                         ║
+     * ║   T7  线程B：双重检查 SELECT → READ COMMITTED 看不到A的未提交数据 ║
+     * ║             → 查到"不存在"，通过检查！                            ║
+     * ║   T8  线程B：INSERT 同一笔交易 ← 重复创建！                       ║
+     * ║   T9  线程A：initiatePayment() return → 事务才提交               ║
+     * ║                                                                  ║
+     * ║  后果：同一用户同一订单被创建两条交易记录，可能双重扣款            ║
+     * ║                                                                  ║
+     * ║  修复方案：                                                       ║
+     * ║   ① 去掉外层 @Transactional（本方法不再开事务）                   ║
+     * ║   ② 在 doPaymentWithLock() 内部使用 TransactionTemplate          ║
+     * ║      让事务在锁释放之前提交（锁仍持有时 → 事务提交 → 释放锁）      ║
+     * ║   ③ 数据库加 UNIQUE INDEX(IDEMPOTENCY_KEY) 作为最后兜底           ║
+     * ╚══════════════════════════════════════════════════════════════════╝
      */
-    @Transactional(rollbackFor = Exception.class)
+    // ✅ Bug2已修复：移除 @Transactional，事务由内部 TransactionTemplate 管理
     public PaymentInitResponse initiatePayment(PaymentInitRequest request) {
         PaymentGateway gateway = gatewayRouter.selectGateway(request.getPaymentMethod());
         return doInitiatePaymentWithDistributedLock(request, gateway);
@@ -70,8 +105,8 @@ public class PaymentServiceEnhanced {
 
     /**
      * 发起支付（指定渠道）
+     * ✅ Bug2已修复：移除 @Transactional
      */
-    @Transactional(rollbackFor = Exception.class)
     public PaymentInitResponse initiatePayment(PaymentInitRequest request, PaymentChannel channel) {
         PaymentGateway gateway = gatewayRouter.getGateway(channel);
         return doInitiatePaymentWithDistributedLock(request, gateway);
@@ -98,45 +133,63 @@ public class PaymentServiceEnhanced {
 
     /**
      * 使用分布式锁的支付流程
+     *
+     * ╔══════════════════════════════════════════════════════════════════╗
+     * ║  Bug2 修复关键点：事务必须在锁释放之前提交                         ║
+     * ║                                                                  ║
+     * ║  正确顺序（修复后）：                                             ║
+     * ║   T1  获取 Redis 锁                                              ║
+     * ║   T2  TransactionTemplate.execute() → 开启事务                   ║
+     * ║   T3  双重检查 SELECT                                            ║
+     * ║   T4  INSERT 交易记录                                            ║
+     * ║   T5  execute() 结束 → 事务提交 ← 锁还没释放！                   ║
+     * ║   T6  finally → lock.unlock()  ← 事务已提交后才释放锁             ║
+     * ║                                                                  ║
+     * ║  此时其他线程拿到锁后做双重检查，一定能看到已提交的数据，幂等成功   ║
+     * ╚══════════════════════════════════════════════════════════════════╝
      */
     private PaymentInitResponse doPaymentWithLock(
-            PaymentInitRequest request, 
+            PaymentInitRequest request,
             PaymentGateway gateway,
             String idempotencyKey) {
-        
+
         String lockKey = "payment:lock:" + idempotencyKey;
         RLock lock = redissonClient.getLock(lockKey);
-        
+
         try {
             // 尝试获取锁，最多等待5秒，锁定30秒
             boolean locked = lock.tryLock(lockWaitTime, lockLeaseTime, TimeUnit.SECONDS);
-            
+
             if (!locked) {
                 log.warn("获取分布式锁超时，幂等键：{}", idempotencyKey);
                 throw new PaymentException("系统繁忙，请稍后重试");
             }
-            
+
             log.debug("获取分布式锁成功，幂等键：{}", idempotencyKey);
-            
-            // 双重检查：再次查询是否已存在
-            PaymentTransaction existing = transactionMapper.selectByIdempotencyKey(idempotencyKey);
-            if (existing != null) {
-                log.info("双重检查发现交易已存在，幂等键：{}", idempotencyKey);
-                return buildResponseFromTransaction(existing);
-            }
-            
-            // 执行支付创建
-            return doInitiatePayment(request, gateway, idempotencyKey);
-            
+
+            // ✅ Bug2修复：用 TransactionTemplate 让事务在 finally 锁释放之前提交
+            // execute() 方法返回时事务已提交，而 finally 的 unlock() 还未执行
+            return transactionTemplate.execute(txStatus -> {
+                // 双重检查：在事务内再次查询（此时能看到所有已提交数据）
+                PaymentTransaction existing = transactionMapper.selectByIdempotencyKey(idempotencyKey);
+                if (existing != null) {
+                    log.info("双重检查发现交易已存在，幂等键：{}", idempotencyKey);
+                    return buildResponseFromTransaction(existing);
+                }
+                // 执行支付创建（INSERT + gateway调用 + UPDATE，全在同一事务内）
+                return doInitiatePayment(request, gateway, idempotencyKey);
+            }); // ← 事务在这里提交，此时锁依然持有
+
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.error("获取分布式锁被中断", e);
             throw new PaymentException("系统繁忙，请稍后重试", e);
         } finally {
-            // 释放锁
+            // ✅ 事务已在 transactionTemplate.execute() 结束时提交
+            //    现在才释放锁，其他线程进来双重检查必定能查到已提交的记录
             if (lock.isHeldByCurrentThread()) {
                 lock.unlock();
-                log.debug("释放分布式锁，幂等键：{}", idempotencyKey);
+                log.debug("释放分布式锁（事务已提交），幂等键：{}", idempotencyKey);
             }
         }
     }
@@ -214,32 +267,62 @@ public class PaymentServiceEnhanced {
 
     /**
      * 生成幂等键（优化策略）
-     * 
+     *
      * 优先级：
-     * 1. 前端传递的幂等Token（推荐）
-     * 2. 订单号 + 支付方式（适合一订单多支付）
-     * 3. 订单号 + 金额 + 时间戳（兜底）
+     *   策略1：前端传递幂等Token（UUID，强烈推荐）
+     *   策略2：订单号 + 支付方式（前端无Token时的兜底）
+     *   策略3：❌ 已废弃（原来用时间戳，有严重Bug）
+     *
+     * ╔══════════════════════════════════════════════════════════════════╗
+     * ║  ⚠️  BUG-1 记录（已修复）：原策略3 使用时间戳导致幂等失效          ║
+     * ║                                                                  ║
+     * ║  原代码：                                                        ║
+     * ║   String key = orderRef + "_" + amount + "_" +                  ║
+     * ║                System.currentTimeMillis(); ← 每次都不同！        ║
+     * ║                                                                  ║
+     * ║  触发条件：                                                       ║
+     * ║   前端未传 idempotencyToken 且 request.paymentMethod == null     ║
+     * ║   （部分旧版前端未传 paymentMethod 字段时会走到策略3）             ║
+     * ║                                                                  ║
+     * ║  问题时序：                                                       ║
+     * ║   T1  用户点击支付，请求1到达 → key = ORDER001_100_1710000001000 ║
+     * ║       → INSERT 交易A（PENDING），返回支付URL                     ║
+     * ║   T2  网络超时，用户看不到响应，前端重试                           ║
+     * ║   T3  请求2到达 → key = ORDER001_100_1710000001500 ← 时间变了！  ║
+     * ║       → 幂等检查：这个key没见过 → 通过！                          ║
+     * ║       → INSERT 交易B（PENDING），又返回一个支付URL                ║
+     * ║   T4  用户拿到两个支付URL，支付了两次                             ║
+     * ║   T5  银行扣款2次，用户损失 100 × 2 = 200 元 !!                  ║
+     * ║                                                                  ║
+     * ║  修复方案：策略3改为抛异常，强制调用方提供稳定的幂等键             ║
+     * ║  根治方案：前端统一生成 UUID 作为 idempotencyToken                ║
+     * ╚══════════════════════════════════════════════════════════════════╝
      */
     private String generateIdempotencyKey(PaymentInitRequest request) {
-        // 策略1：前端传递幂等Token（最推荐）
+
+        // ✅ 策略1：前端传递幂等Token（UUID，最推荐，前端在点击支付时生成并缓存）
         if (request.getIdempotencyToken() != null && !request.getIdempotencyToken().isEmpty()) {
             log.debug("使用前端幂等Token：{}", request.getIdempotencyToken());
             return request.getIdempotencyToken();
         }
-        
-        // 策略2：订单号 + 支付方式（适合一订单支持多种支付方式）
-        if (request.getPaymentMethod() != null) {
+
+        // ✅ 策略2：订单号 + 支付方式（适合一订单支持多种支付方式，语义稳定）
+        if (request.getPaymentMethod() != null && !request.getPaymentMethod().isEmpty()) {
             String key = request.getOrderReference() + "_" + request.getPaymentMethod();
             log.debug("使用订单号+支付方式作为幂等键：{}", key);
             return key;
         }
-        
-        // 策略3：订单号 + 金额 + 时间戳（兜底，但不推荐）
-        String key = request.getOrderReference() + "_" +
-                     request.getAmount().toString() + "_" +
-                     System.currentTimeMillis();
-        log.warn("使用时间戳幂等键（不推荐），订单号：{}", request.getOrderReference());
-        return key;
+
+        // ❌ 策略3（已废弃）：原来用时间戳，每次请求key不同，幂等失效，可导致重复扣款
+        // 旧代码：System.currentTimeMillis() ← 绝对不能用，已删除
+        // 修复：强制抛异常，让调用方修正请求（必须提供 idempotencyToken 或 paymentMethod）
+        log.error("【Bug1修复】收到不完整请求：订单号={}，idempotencyToken=null，paymentMethod=null。" +
+                  "拒绝处理以防重复扣款。请前端传递 idempotencyToken (UUID) 字段。",
+                  request.getOrderReference());
+        throw new PaymentException(
+            "请求缺少幂等标识：请传递 idempotencyToken（推荐）或 paymentMethod 字段，" +
+            "以防止网络重试导致重复扣款"
+        );
     }
 
     /**
@@ -324,8 +407,8 @@ public class PaymentServiceEnhanced {
             } else {
                 // ── Step 3b：网关业务失败（如余额不足等）→ REFUND_FAILED ────
                 finalUpdate.setPaymentStatus(PaymentStatus.REFUND_FAILED.name());
-                finalUpdate.setErrorMessage("网关退款失败：" + response.getMessage());
-                log.error("退款网关返回失败，交易ID：{}，原因：{}", transaction.getTransactionId(), response.getMessage());
+                finalUpdate.setErrorMessage("网关退款失败：" + response.getErrorMessage());
+                log.error("退款网关返回失败，交易ID：{}，原因：{}", transaction.getTransactionId(), response.getErrorMessage());
             }
             finalUpdate.setStatusUpdateTime(new Date());
             finalUpdate.setUpdateUser(request.getOperator() != null ? request.getOperator() : "SYSTEM");
