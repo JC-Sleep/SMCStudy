@@ -1,0 +1,17 @@
+第一步：在 Elements 面板选中那个 <input> 元素（让它变成 $0）
+就是截图里你已经选中的那个 input，Chrome 会自动把当前选中元素赋值给 $0
+第二步：在 Console 输入以下脚本
+
+// 1. 解除禁用
+$0.removeAttribute('disabled');
+
+// 2. 用原生 setter 设值（Vue 才能检测到变化）
+var nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+nativeSetter.call($0, 'JC_Zhang@smartone.com');
+
+// 3. 触发 Vue 的 input 事件（更新 v-model 绑定的数据）
+$0.dispatchEvent(new Event('input', { bubbles: true }));
+$0.dispatchEvent(new Event('change', { bubbles: true }));
+
+// 4. 确认结果
+console.log('当前值：', $0.value);
