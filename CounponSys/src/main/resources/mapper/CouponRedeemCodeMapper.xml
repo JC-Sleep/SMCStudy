@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="sys.smc.coupon.mapper.CouponRedeemCodeMapper">
+
+    <!--
+        Oracle批量INSERT使用 INSERT ALL 语法
+        注意：Oracle不支持MySQL的 INSERT INTO ... VALUES (...),(...)
+    -->
+    <insert id="batchInsert" parameterType="list">
+        INSERT ALL
+        <foreach collection="list" item="item">
+            INTO T_COUPON_REDEEM_CODE
+            (ID, CODE, BATCH_ID, TEMPLATE_ID, STATUS, FAIL_COUNT, EXPIRE_TIME, CREATE_TIME, UPDATE_TIME, DELETED)
+            VALUES
+            (#{item.id}, #{item.code}, #{item.batchId}, #{item.templateId},
+             0, 0, #{item.expireTime}, SYSTIMESTAMP, SYSTIMESTAMP, 0)
+        </foreach>
+        SELECT 1 FROM DUAL
+    </insert>
+
+</mapper>
+

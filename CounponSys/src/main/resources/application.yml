@@ -5,19 +5,47 @@ spring:
   application:
     name: coupon-system
 
-  # 数据源配置 - Oracle
+  # 数据源配置 - Oracle + Druid连接池监控
   datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
     driver-class-name: oracle.jdbc.OracleDriver
     url: jdbc:oracle:thin:@${DB_HOST:localhost}:${DB_PORT:1521}:${DB_SID:ORCL}
     username: ${DB_USERNAME:coupon_user}
     password: ${DB_PASSWORD:coupon_pass}
-    hikari:
-      maximum-pool-size: 20
-      minimum-idle: 5
-      connection-timeout: 30000
-      idle-timeout: 600000
-      max-lifetime: 1800000
-      pool-name: CouponHikariPool
+    druid:
+      # 连接池大小
+      initial-size: 5
+      min-idle: 5
+      max-active: 20
+      max-wait: 30000
+      # 检测空闲/泄漏连接（关键！防止长连接卡死）
+      time-between-eviction-runs-millis: 60000    # 每分钟检测一次
+      min-evictable-idle-time-millis: 300000       # 空闲5分钟才回收
+      max-evictable-idle-time-millis: 900000       # 最长空闲15分钟强制回收
+      validation-query: SELECT 1 FROM DUAL         # Oracle心跳SQL
+      test-while-idle: true                        # 空闲时检测连接有效性
+      test-on-borrow: false                        # 借出时不检测（性能考虑）
+      test-on-return: false
+      # 连接泄漏检测（排查哪个SQL长连接卡住）
+      remove-abandoned: true
+      remove-abandoned-timeout: 180                # 3分钟未归还判定为泄漏
+      log-abandoned: true                          # 打印泄漏连接的调用栈（定位问题！）
+      # 慢SQL监控
+      connection-properties: druid.stat.mergeSql=true;druid.stat.slowSqlMillis=2000
+      # 过滤器：stat=SQL统计, wall=SQL防注入, slf4j=日志
+      filters: stat,wall,slf4j
+      # Druid Web监控控制台
+      stat-view-servlet:
+        enabled: true
+        url-pattern: /druid/*
+        login-username: ${DRUID_USER:admin}
+        login-password: ${DRUID_PASS:admin123}
+        allow: 127.0.0.1                           # 生产环境限制只允许内网访问
+        reset-enable: false
+      web-stat-filter:
+        enabled: true
+        url-pattern: /*
+        exclusions: "*.js,*.gif,*.jpg,*.css,/druid/*"
 
   # Redis配置
   redis:
@@ -129,6 +157,12 @@ coupon:
   code:
     prefix: CP
     length: 16
+    # 兑换码防刷配置
+    redeem:
+      hmac-secret: ${COUPON_HMAC_SECRET:CouponSys@SmartOne2026!}  # 生产必须改！
+      ip-rate-limit: 10          # 同IP每分钟最多尝试兑换次数
+      user-rate-limit: 5         # 同用户每分钟最多尝试兑换次数
+      global-rate-limit: 5000    # 全局每秒最大兑换请求数
   # 库存预警阈值
   stock:
     warning-threshold: 0.1

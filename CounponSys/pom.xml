@@ -89,10 +89,17 @@
             <artifactId>activemq-broker</artifactId>
         </dependency>
 
-        <!-- HikariCP 连接池 -->
+        <!-- Druid 连接池监控 (替换HikariCP，带SQL监控/慢查询/连接泄漏) -->
         <dependency>
-            <groupId>com.zaxxer</groupId>
-            <artifactId>HikariCP</artifactId>
+            <groupId>com.alibaba</groupId>
+            <artifactId>druid-spring-boot-starter</artifactId>
+            <version>1.2.20</version>
+        </dependency>
+
+        <!-- Spring Boot Actuator (配合Druid监控) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
 
         <!-- Lombok -->
