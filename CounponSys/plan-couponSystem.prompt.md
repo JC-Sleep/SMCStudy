@@ -36,6 +36,10 @@
 > - ✅ **K8s快速扩缩容脚本** (2026-03-27 新增)
 > - ✅ **Druid连接池监控** (2026-04-17 新增) — 替换HikariCP，含Web控制台/慢SQL/连接泄漏检测
 > - ✅ **兑换码生成与防刷兑换** (2026-04-17 新增) — HMAC签名+6层防刷体系+DB原子更新
+> - ✅ **失败次数锁定（惩罚层）精细化** (2026-04-20 新增) — 仅CAS并发失败才计FAIL_COUNT，终态码不触发锁定
+> - ✅ **失败5次锁定→三级自助处理流程** (2026-04-20 新增) — 大部分不需人工介入
+> - ✅ **UNLOCK_COUNT防解锁滥用** (2026-04-20 新增) — 超2次解锁强制人工审核，防社工攻击
+> - ✅ **网络失败幂等重试方案** (2026-04-20 新增) — requestId缓存，防用户重试看到"已被使用"困惑提示
 >
 > **性能指标**: 支持千万级用户，5-10W QPS并发，Redis压力↓70%，Kafka消费速度↑100%，积压恢复速度↑5.5倍
 
@@ -678,6 +682,128 @@ Job定时任务：
      - 第92行：`order.setStatus(0)` - 订单待处理状态
      - 第99行：`kafkaTemplate.send()` - 发送Kafka消息
      - 第106行：`message("抢购成功,正在处理中")` - 立即返回，不等Kafka
+
+---
+
+## 兑换码防刷体系精细化（2026-04-20新增）
+
+> 详细方案见：`Druid监控和防刷兑换码.md`（完整版含图解、代码、DB设计）
+
+### 6层防刷体系（修正版）
+
+| 层 | 机制 | 防什么 | 重要程度 |
+|----|------|--------|---------|
+| 第1层 | HMAC-SHA256签名校验 | 枚举/伪造码（防99%） | ⭐⭐⭐⭐⭐ 核心 |
+| 第2层 | IP限速（Redis，1分钟10次） | 单机高频扫码 | ⭐⭐⭐ 辅助 |
+| 第3层 | 用户限速（Redis，1分钟5次） | 羊毛党批量账号 | ⭐⭐⭐ 辅助 |
+| 第4层 | Redisson分布式锁 | 双击/网络重试并发重复提交 | ⭐⭐⭐⭐ 重要 |
+| 第5层 | DB CAS原子更新 WHERE STATUS=0 | **重复兑换终极防线** | ⭐⭐⭐⭐⭐ 核心 |
+| 第6层 | 失败次数锁定（FAIL_COUNT>=5） | 持续暴力重试单码（冗余防御） | ⭐⭐ 冗余 |
+| 解锁保护 | UNLOCK_COUNT>=2强制人工 | 客服被社工/已用码被解锁重用 | ⭐⭐⭐ 运营安全 |
+
+### FAIL_COUNT正确触发条件（精细化后）
+
+| 触发条件 | 是否加FAIL_COUNT | 原因 |
+|---------|----------------|------|
+| HMAC验签失败（格式非法码） | ❌ 不加 | 第1层直接拦截，不查DB |
+| 码在DB中不存在 | ❌ 不加 | 没有记录可以加 |
+| 码 STATUS=1（已使用） | ❌ 不加 | 终态，直接返回"已被使用"，不触发锁定 |
+| 码 STATUS=2（已过期） | ❌ 不加 | 终态，直接返回"已过期" |
+| 码 STATUS=3（已锁定） | ❌ 不加 | 已是终态 |
+| 码 STATUS=0，CAS并发失败（affected=0） | ✅ 加 | 真实有效码被并发争抢 |
+
+**关键结论**：正常业务流程中 FAIL_COUNT 几乎不会累积到5，真正的安全由第1层HMAC+第5层CAS保证，FAIL_COUNT是冗余防御。
+
+### 失败5次锁定 → 三级处理流程
+
+```
+码被锁定（STATUS=3）
+      │
+      ▼
+第1级：用户自助解锁（APP内）
+  条件：码从未成功兑换过（STATUS≠1）
+  限制：UNLOCK_COUNT < 2
+  结果：STATUS→0，FAIL_COUNT→0，UNLOCK_COUNT+1
+      │ 解锁失败（UNLOCK_COUNT>=2）
+      ▼
+第2级：客服二次确认解锁
+  条件：查看兑换记录确认码未被成功使用
+  需要：提供购买凭证/截图
+  结果：STATUS→0，UNLOCK_COUNT+1，记录操作日志
+      │ 解锁失败 或 UNLOCK_COUNT>=3
+      ▼
+第3级：强制人工审核（上级审批）
+  条件：UNLOCK_COUNT>=2（系统自动触发告警）
+  流程：安全团队核查IP、设备、兑换记录
+  结论：补发新码 或 永久锁定 或 退款处理
+```
+
+**大部分情况不需人工介入的原因**：
+1. 正常用户：码有效（STATUS=0）→ CAS成功 → 直接兑换成功，FAIL_COUNT不会到5
+2. 输错码：HMAC第1层直接拒绝，连DB都不查，没有FAIL_COUNT
+3. 码已被用：STATUS=1终态，直接提示"已被使用"，不加FAIL_COUNT
+4. 只有极少数真实有效码被并发争抢才触发FAIL_COUNT，且实际上成功兑换后STATUS=1就已是终态
+
+### UNLOCK_COUNT防解锁滥用
+
+**防御的攻击链**：
+```
+攻击者B → 社工客服 → "帮我解锁码" 
+→ 客服把STATUS=1改回0 → 攻击者兑换 → 真实用户码被盗用
+```
+
+**防御规则**：
+- `UNLOCK_COUNT < 2`：允许解锁（可能是正常操作失误）
+- `UNLOCK_COUNT >= 2`：强制上级审批 + 系统自动告警
+- **关键**：STATUS=1（已成功兑换）的码**绝对禁止解锁**，需走补发新码流程
+
+### 网络失败幂等方案
+
+```
+问题：服务端兑换成功（STATUS=1），但响应网络丢失，用户重试
+结果：再次提交 → STATUS=1 → 返回"已被使用" → 用户困惑
+
+解决：前端幂等requestId
+  提交时携带 requestId（UUID）
+  服务端缓存结果（Redis, 5分钟TTL）
+  同一requestId → 返回原来的"成功"结果
+  → 用户不会看到"已被使用"困惑提示
+```
+
+### 技术实现文件索引
+
+| 功能 | 文件 | 关键方法 |
+|------|------|---------|
+| 码生成 | `util/RedeemCodeGenerator.java` | `generate(batchId, seq)` |
+| HMAC验签 | `util/RedeemCodeGenerator.java` | `verify(code)` |
+| 兑换服务 | `service/impl/RedeemCodeServiceImpl.java` | `doRedeem()`, `casRedeemCode()` |
+| 失败锁定 | `mapper/RedeemCodeMapper.java` | `incrementFailCount()`, `lockCode()` |
+| 自助解锁 | `service/impl/RedeemCodeServiceImpl.java` | `selfUnlock()` |
+| 管理解锁 | `service/impl/RedeemCodeServiceImpl.java` | `adminUnlock()` |
+| DB表设计 | `resources/db/schema.sql` | `T_COUPON_REDEEM_CODE`, `T_REDEEM_CODE_BATCH` |
+
+### API接口（兑换码模块）
+
+| 方法 | 路径 | 说明 | 调用方 |
+|------|------|------|--------|
+| POST | /api/redeem-code/batch/generate | 批量生成码 | 管理后台 |
+| POST | /api/redeem-code/redeem | 用户兑换 | APP/H5 |
+| POST | /api/redeem-code/unlock | 用户自助解锁 | APP |
+| POST | /api/redeem-code/admin/unlock | 客服/管理员解锁（需UNLOCK_COUNT<2） | 客服后台 |
+| GET  | /api/redeem-code/batch/{id} | 查询批次统计 | 管理后台 |
+
+### 易混字符处理（用户体验）
+
+```java
+// 生成码时去掉易混字符（0/O/1/I/L），使用32个安全字符
+private static final String SAFE_CHARS = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+
+// 前端/后端输入预处理
+String normalizeCode(String input) {
+    return input.toUpperCase().trim().replace(" ", "").replace("-", "");
+}
+```
+
 
 
 
