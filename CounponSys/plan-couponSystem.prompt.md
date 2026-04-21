@@ -40,6 +40,12 @@
 > - ✅ **失败5次锁定→三级自助处理流程** (2026-04-20 新增) — 大部分不需人工介入
 > - ✅ **UNLOCK_COUNT防解锁滥用** (2026-04-20 新增) — 超2次解锁强制人工审核，防社工攻击
 > - ✅ **网络失败幂等重试方案** (2026-04-20 新增) — requestId缓存，防用户重试看到"已被使用"困惑提示
+> - ✅ **瑕疵修复：分布式事务（本地消息表）** (2026-04-20 修复) — T_GRANT_TASK+GrantTask+GrantTaskMapper+重试Job，CAS与写Task同一事务
+> - ✅ **瑕疵修复：兑换码过期Job** (2026-04-20 修复) — expireRedeemCodes()每小时批量标记，分批5000条防大事务
+> - ✅ **瑕疵修复：同批次重复兑换限制** (2026-04-20 修复) — MAX_PER_USER字段+countRedeemedByUserAndBatch校验
+> - ✅ **瑕疵修复：requestId幂等实现** (2026-04-20 修复) — Redis缓存5分钟，Controller传参，Service查缓存
+> - ✅ **瑕疵修复：JWT身份认证** (2026-04-20 修复) — JwtUtil+JwtAuthFilter+SecurityConfig，接口分USER/ADMIN权限
+> - ✅ **瑕疵修复：UNLOCK_COUNT解锁保护** (2026-04-20 修复) — selfUnlock/adminUnlock，STATUS=1禁止解锁，>=2次强制人工
 >
 > **性能指标**: 支持千万级用户，5-10W QPS并发，Redis压力↓70%，Kafka消费速度↑100%，积压恢复速度↑5.5倍
 

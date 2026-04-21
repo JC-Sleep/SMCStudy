@@ -6,20 +6,27 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import sys.smc.coupon.entity.GrantTask;
 import sys.smc.coupon.entity.SeckillActivity;
 import sys.smc.coupon.enums.SeckillStatus;
+import sys.smc.coupon.mapper.CouponRedeemCodeMapper;
+import sys.smc.coupon.mapper.GrantTaskMapper;
 import sys.smc.coupon.mapper.SeckillActivityMapper;
 import sys.smc.coupon.service.CouponService;
 import sys.smc.coupon.service.SeckillService;
-// 2026-03-26 新增
+import sys.smc.coupon.service.impl.CouponServiceImpl;
 import sys.smc.coupon.util.DynamicRateLimiterManager;
-// end 2026-03-26 新增
 
-import java.time.LocalDateTime;
+import java.util.Calendar;
+import java.util.Date;
 import java.util.List;
+import java.time.LocalDateTime;
 
 /**
  * 优惠券定时任务
+ * 2026-04-20 新增：
+ *   ① expireRedeemCodes()     — 兑换码过期Job（修复缺失瑕疵）
+ *   ② retryPendingGrantTasks()— 发券补偿重试Job（修复分布式事务瑕疵）
  */
 @Slf4j
 @Component
@@ -29,11 +36,13 @@ public class CouponScheduledJob {
     private final CouponService couponService;
     private final SeckillService seckillService;
     private final SeckillActivityMapper seckillActivityMapper;
-    // 2026-03-26 新增
-    private final SeckillOrderMapper seckillOrderMapper;
-    private final RedisTemplate<String, Object> redisTemplate;
-    // end 2026-03-26 新增
     private final DynamicRateLimiterManager dynamicRateLimiterManager;
+
+    // 2026-04-20 新增
+    private final CouponRedeemCodeMapper redeemCodeMapper;
+    private final GrantTaskMapper grantTaskMapper;
+    private final CouponServiceImpl couponServiceImpl;
+    // end 2026-04-20 新增
 
     @Value("${seckill.warmup-minutes:10}")
     private int warmupMinutes;
@@ -46,6 +55,115 @@ public class CouponScheduledJob {
         log.info("开始处理过期优惠券...");
         int count = couponService.processExpiredCoupons();
         log.info("处理过期优惠券完成, 共处理: {} 张", count);
+    }
+
+    // ============================================================
+    // 2026-04-20 修复：兑换码过期Job（原来只有懒检查，统计数据不准）
+    // ============================================================
+
+    /**
+     * 批量标记过期兑换码（修复瑕疵③）
+     *
+     * 问题：T_COUPON_REDEEM_CODE 表只在用户提交时懒检查过期
+     *      导致大量STATUS=0的码实际上已过期，统计数据不准确
+     *      （"还有多少可用码"显示虚高）
+     *
+     * 修复：每小时批量扫描，将 STATUS=0 且 EXPIRE_TIME<NOW 的码更新为 STATUS=2
+     *      每次最多处理5000条，防止大事务锁表
+     *
+     * 执行时间：每小时第5分钟（错开整点，避免与 processExpiredCoupons 同时执行）
+     */
+    @Scheduled(cron = "0 5 * * * ?")
+    public void expireRedeemCodes() {
+        log.info("[兑换码过期Job] 开始批量标记过期兑换码...");
+        try {
+            int total = 0;
+            int batchSize = 5000;
+            int affected;
+            // 循环处理，直到没有需要过期的码（防止单次5000条处理不完）
+            do {
+                affected = redeemCodeMapper.batchExpire(batchSize);
+                total += affected;
+                if (affected > 0) {
+                    log.info("[兑换码过期Job] 本批次标记 {} 条过期，累计 {} 条", affected, total);
+                }
+            } while (affected == batchSize); // 若刚好处理了5000条，可能还有更多
+            log.info("[兑换码过期Job] 完成，共标记 {} 条兑换码为过期", total);
+        } catch (Exception e) {
+            log.error("[兑换码过期Job] 执行失败", e);
+        }
+    }
+
+    // ============================================================
+    // 2026-04-20 修复：发券补偿重试Job（解决分布式事务问题）
+    // ============================================================
+
+    /**
+     * 重试待处理的发券补偿任务（修复瑕疵①）
+     *
+     * 背景：CAS成功（码标记使用）后，grantCoupon()可能失败（外部服务超时/DB抖动）
+     *      原代码直接报错，导致"码用掉了但用户没收到券"
+     *
+     * 修复流程：
+     *   CAS成功 + 写T_GRANT_TASK（同一事务） → 本Job重试 → 最终用户收到券
+     *
+     * 重试策略（指数退避）：
+     *   第1次失败 → 1分钟后重试
+     *   第2次失败 → 5分钟后重试
+     *   第3次失败 → 30分钟后重试 → 超限标记status=2，人工告警
+     *
+     * 执行频率：每分钟检查一次
+     */
+    @Scheduled(cron = "0 * * * * ?")
+    public void retryPendingGrantTasks() {
+        List<GrantTask> tasks = grantTaskMapper.selectPendingTasks(new Date());
+        if (tasks.isEmpty()) return;
+
+        log.info("[发券补偿Job] 发现 {} 个待处理任务", tasks.size());
+        for (GrantTask task : tasks) {
+            processGrantTask(task);
+        }
+    }
+
+    private void processGrantTask(GrantTask task) {
+        try {
+            // 幂等检查：若已有成功记录，直接标记完成
+            if (grantTaskMapper.countSuccessByCode(task.getRedeemCode()) > 0) {
+                grantTaskMapper.markSuccess(task.getId(), task.getCouponId());
+                log.info("[发券补偿Job] 幂等跳过 taskId={} code={}", task.getId(), task.getRedeemCode());
+                return;
+            }
+
+            // 重试发券
+            sys.smc.coupon.entity.Coupon issued = couponServiceImpl.grantCoupon(
+                    task.getUserId(), task.getUserId(), task.getTemplateId(), 7, "REDEEM_CODE_RETRY");
+
+            grantTaskMapper.markSuccess(task.getId(), issued.getId());
+            log.info("[发券补偿Job] 重试成功 taskId={} code={} couponId={}",
+                    task.getId(), task.getRedeemCode(), issued.getId());
+
+        } catch (Exception e) {
+            // 计算下次重试时间（指数退避）
+            int retryCount = task.getRetryCount() != null ? task.getRetryCount() : 0;
+            int delayMinutes = retryCount < GrantTask.RETRY_DELAYS_MINUTES.length
+                    ? GrantTask.RETRY_DELAYS_MINUTES[retryCount]
+                    : 60; // 超出预设，默认1小时
+            Calendar cal = Calendar.getInstance();
+            cal.add(Calendar.MINUTE, delayMinutes);
+
+            grantTaskMapper.markFailed(task.getId(), e.getMessage(), cal.getTime());
+
+            // 超限时人工告警
+            if (retryCount + 1 >= (task.getMaxRetry() != null ? task.getMaxRetry() : 3)) {
+                log.error("[发券补偿Job][人工告警🚨] taskId={} code={} userId={} 重试{}次失败，需人工处理！原因: {}",
+                        task.getId(), task.getRedeemCode(), task.getUserId(),
+                        retryCount + 1, e.getMessage());
+                // TODO: 接入告警系统（Slack/钉钉/邮件）
+            } else {
+                log.warn("[发券补偿Job] 重试失败 taskId={} retryCount={} 下次重试: {}分钟后",
+                        task.getId(), retryCount + 1, delayMinutes);
+            }
+        }
     }
 
     /**

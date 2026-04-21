@@ -188,6 +188,8 @@ CREATE TABLE T_REDEEM_CODE_BATCH (
     TOTAL_COUNT     NUMBER(10)      NOT NULL,
     REDEEMED_COUNT  NUMBER(10)      DEFAULT 0,
     STATUS          NUMBER(1)       DEFAULT 1,   -- 0生成中 1已激活 2已停用 3已过期
+    -- 每个用户在此批次最多可兑换N张码（默认1张，防羊毛党同批次兑多张）
+    MAX_PER_USER    NUMBER(5)       DEFAULT 1,
     EXPIRE_TIME     TIMESTAMP       NOT NULL,
     CREATE_BY       VARCHAR2(50),
     REMARK          VARCHAR2(500),
@@ -221,6 +223,8 @@ CREATE TABLE T_COUPON_REDEEM_CODE (
     REDEEM_CHANNEL  VARCHAR2(20),                -- APP/WEB/H5/SMS
     -- 失败次数超过MAX_FAIL_COUNT(5次)自动锁定该码，防暴力重试
     FAIL_COUNT      NUMBER(5)       DEFAULT 0,
+    -- 已解锁次数；>=2次时强制人工审核，防止攻击者"社工客服反复解锁→暴力枚举"
+    UNLOCK_COUNT    NUMBER(3)       DEFAULT 0,
     EXPIRE_TIME     TIMESTAMP       NOT NULL,
     CREATE_TIME     TIMESTAMP       DEFAULT SYSTIMESTAMP,
     UPDATE_TIME     TIMESTAMP       DEFAULT SYSTIMESTAMP,
@@ -232,6 +236,7 @@ CREATE TABLE T_COUPON_REDEEM_CODE (
 COMMENT ON TABLE  T_COUPON_REDEEM_CODE             IS '兑换码实例表';
 COMMENT ON COLUMN T_COUPON_REDEEM_CODE.STATUS      IS '状态:0未使用,1已使用,2已过期,3已锁定(失败超限)';
 COMMENT ON COLUMN T_COUPON_REDEEM_CODE.FAIL_COUNT  IS '兑换失败次数，超过5次自动锁定';
+COMMENT ON COLUMN T_COUPON_REDEEM_CODE.UNLOCK_COUNT IS '解锁次数，>=2次强制人工审核，防社工攻击';
 COMMENT ON COLUMN T_COUPON_REDEEM_CODE.CODE        IS 'HMAC签名码，格式CP-BASE36ID-HMAC4，防枚举';
 
 -- 查询索引
@@ -240,6 +245,53 @@ CREATE INDEX IDX_RDCODE_TEMPLATE ON T_COUPON_REDEEM_CODE(TEMPLATE_ID);
 CREATE INDEX IDX_RDCODE_STATUS   ON T_COUPON_REDEEM_CODE(STATUS);
 CREATE INDEX IDX_RDCODE_USER     ON T_COUPON_REDEEM_CODE(USER_ID);
 CREATE INDEX IDX_RDCODE_EXPIRE   ON T_COUPON_REDEEM_CODE(EXPIRE_TIME);
+
+
+-- =============================================
+-- 2026-04-20 新增：兑换码发券补偿任务表（本地消息表）
+-- 解决分布式事务问题：CAS成功后发券失败的自动补偿
+-- 原理：CAS成功 + 写task 在同一事务，task由Job重试发券
+-- =============================================
+CREATE TABLE T_GRANT_TASK (
+    ID              NUMBER(19)      PRIMARY KEY,
+    -- 关联的兑换码
+    REDEEM_CODE     VARCHAR2(32)    NOT NULL,
+    -- 要发给哪个用户
+    USER_ID         VARCHAR2(50)    NOT NULL,
+    -- 要发哪个券模板
+    TEMPLATE_ID     NUMBER(19)      NOT NULL,
+    -- 任务状态: 0=待处理 1=成功 2=失败超限 3=人工取消
+    STATUS          NUMBER(1)       DEFAULT 0,
+    -- 已重试次数
+    RETRY_COUNT     NUMBER(3)       DEFAULT 0,
+    -- 最大重试次数（超过后标记失败，人工介入）
+    MAX_RETRY       NUMBER(3)       DEFAULT 3,
+    -- 发券成功后的券实例ID（用于幂等判断）
+    COUPON_ID       NUMBER(19),
+    -- 失败原因（用于人工排查）
+    FAIL_REASON     VARCHAR2(500),
+    -- 下次重试时间（指数退避：1min → 5min → 30min）
+    NEXT_RETRY_TIME TIMESTAMP,
+    CREATE_TIME     TIMESTAMP       DEFAULT SYSTIMESTAMP,
+    UPDATE_TIME     TIMESTAMP       DEFAULT SYSTIMESTAMP
+);
+
+COMMENT ON TABLE  T_GRANT_TASK             IS '兑换码发券补偿任务表（本地消息表，解决分布式事务）';
+COMMENT ON COLUMN T_GRANT_TASK.STATUS      IS '任务状态:0待处理,1成功,2失败超限需人工,3人工取消';
+COMMENT ON COLUMN T_GRANT_TASK.RETRY_COUNT IS '已重试次数，超过MAX_RETRY标记失败';
+
+CREATE INDEX IDX_GRANT_TASK_STATUS ON T_GRANT_TASK(STATUS, NEXT_RETRY_TIME);
+CREATE INDEX IDX_GRANT_TASK_CODE   ON T_GRANT_TASK(REDEEM_CODE);
+
+
+-- =============================================
+-- 2026-04-20 新增：Alter语句（已有表新增字段）
+-- 如果在已有环境执行，运行以下ALTER
+-- =============================================
+-- ALTER TABLE T_COUPON_REDEEM_CODE ADD UNLOCK_COUNT NUMBER(3) DEFAULT 0;
+-- ALTER TABLE T_REDEEM_CODE_BATCH   ADD MAX_PER_USER NUMBER(5) DEFAULT 1;
+-- COMMENT ON COLUMN T_COUPON_REDEEM_CODE.UNLOCK_COUNT IS '解锁次数，>=2次强制人工审核';
+-- COMMENT ON COLUMN T_REDEEM_CODE_BATCH.MAX_PER_USER  IS '同一批次同一用户最多可兑换张数';
 
 
 

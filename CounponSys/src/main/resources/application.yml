@@ -173,6 +173,14 @@ coupon:
     # 秒杀单用户限制
     seckill-limit-per-activity: 1
 
+# JWT认证配置（修复瑕疵②：API安全鉴权）
+jwt:
+  # 生产必须改为随机强密钥（至少32字符），通过环境变量注入
+  # K8s: kubectl create secret generic coupon-secrets --from-literal=jwt-secret=xxx
+  secret: ${JWT_SECRET:CouponSys-JWT-Secret-Key-2026-SmartOne!}
+  # Token有效期（小时）
+  expiration-hours: ${JWT_EXPIRATION_HOURS:24}
+
 # 秒杀配置
 seckill:
   # 库存预热提前时间(分钟)

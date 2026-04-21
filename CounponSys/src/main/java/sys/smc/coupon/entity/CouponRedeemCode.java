@@ -56,6 +56,13 @@ public class CouponRedeemCode implements Serializable {
     /** 兑换失败次数（超过MAX_FAIL_COUNT自动锁定） */
     private Integer failCount;
 
+    /**
+     * 已解锁次数
+     * >= 2次：强制人工审核，防止攻击者"社工客服反复解锁→暴力枚举"
+     * 关键：STATUS=1（已成功兑换）的码绝对禁止解锁
+     */
+    private Integer unlockCount;
+
     /** 兑换码过期时间 */
     private Date expireTime;
 

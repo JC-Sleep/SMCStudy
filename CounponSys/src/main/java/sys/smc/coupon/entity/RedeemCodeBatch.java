@@ -35,6 +35,13 @@ public class RedeemCodeBatch implements Serializable {
      */
     private Integer status;
 
+    /**
+     * 同一用户在此批次最多可兑换N张码
+     * 默认1张，防止羊毛党持有多张码套取多张优惠券
+     * 例如：促销短信活动每人最多兑1张，积分礼品可设为3张
+     */
+    private Integer maxPerUser;
+
     /** 批次过期时间 */
     private Date expireTime;
 
