@@ -159,10 +159,20 @@ coupon:
     length: 16
     # 兑换码防刷配置
     redeem:
-      hmac-secret: ${COUPON_HMAC_SECRET:CouponSys@SmartOne2026!}  # 生产必须改！
+      hmac-secret: ${COUPON_HMAC_SECRET:CouponSys@SmartOne2026!}  # 兼容旧配置（v1密钥）
       ip-rate-limit: 10          # 同IP每分钟最多尝试兑换次数
       user-rate-limit: 5         # 同用户每分钟最多尝试兑换次数
       global-rate-limit: 5000    # 全局每秒最大兑换请求数
+    # HMAC密钥版本化配置（2026-04-21新增，解决员工离职密钥泄露问题）
+    # 生产环境通过K8s Secret注入，不在此文件写明文密钥！
+    # kubectl create secret generic coupon-secrets \
+    #   --from-literal=COUPON_HMAC_SECRET_V1=旧密钥 \
+    #   --from-literal=COUPON_HMAC_SECRET_V2=新密钥 \
+    #   --from-literal=HMAC_ACTIVE_VERSION=v2
+    hmac:
+      active-version: ${HMAC_ACTIVE_VERSION:v1}      # 当前生成新码使用的版本
+      secret-v1: ${COUPON_HMAC_SECRET_V1:${coupon.code.redeem.hmac-secret:}} # v1密钥（旧码验签用）
+      secret-v2: ${COUPON_HMAC_SECRET_V2:}           # v2密钥（员工离职后新生成）
   # 库存预警阈值
   stock:
     warning-threshold: 0.1

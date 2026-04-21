@@ -1,7 +1,7 @@
 ````markdown
 # CouponSys — Druid监控 + 分布式兑换码防刷 完整方案
 
-> 更新于 2026-04-20 v2 | 新增：签名算法对比 / CAS原理详解 / 合法码兑换失败处理 / 6层防刷详解
+> 更新于 2026-04-21 v3 | 新增：兑换码生成分配机制 / 用户唯一分配保证 / HMAC密钥泄露风险与轮换方案
 
 ---
 
@@ -716,3 +716,478 @@ CREATE INDEX IDX_RDCODE_EXPIRE  ON T_COUPON_REDEEM_CODE(EXPIRE_TIME);
 - [ ] Redis 使用**集群/哨兵模式**，单点故障会导致限速失效
 - [ ] 解锁接口需配置权限（自助解锁 vs 客服解锁 分开鉴权）
 ````
+
+---
+
+## 十、兑换码生成机制 + 分配流程 + 唯一性保证（2026-04-21新增）
+
+### 10.1 兑换码是针对哪种券生成的？
+
+**一张兑换码 = 一张特定模板券的兑换资格**
+
+```
+层级关系：
+
+CouponTemplate（券模板）
+  │  定义：券的类型、面值、有效期、适用范围
+  │  例如："50港币话费券"、"流量加油包"
+  │
+  └─→ T_REDEEM_CODE_BATCH（兑换码批次）
+        │  运营人员每次生成活动时创建
+        │  绑定：哪种模板、生成多少张、有效到什么时候
+        │  例如："2026春节活动 - 50港币话费券 - 500张"
+        │
+        └─→ T_COUPON_REDEEM_CODE（码实例）× N张
+              │  每张码独立存在，STATUS=0（未使用）
+              │  例如：CP-2K5XM1-A3F7（这一张）
+              │        CP-3X7YPQ-B2K9（另一张）
+              │
+              └─→ T_COUPON（用户券实例）← 兑换成功后创建
+                    绑定到具体用户
+                    用户账户里出现"50港币话费券"
+```
+
+**一句话总结：**
+```
+运营生成：500张码 → 绑定到"50港币话费券"模板
+发放渠道：把码印在包装上 / 发短信 / 发给合作伙伴
+用户兑换：用户输入码 → 系统发一张"50港币话费券"到该用户账户
+```
+
+---
+
+### 10.2 码是怎么生成的，如何保证每张唯一？
+
+```java
+// 生成流程（RedeemCodeGenerator.generate）
+
+// 第1步：用雪花算法生成全局唯一ID（IdWorker，Twitter Snowflake）
+Long codeId = IdWorker.getId();  // 例如：1234567890123456789
+
+// 第2步：ID转Base36（缩短长度，变成可读字符）
+String idPart = toBase36(codeId);  // 例如：2K5XM1
+
+// 第3步：HMAC签名前缀部分，取前4位作为签名
+String payload = "CP-" + idPart;        // "CP-2K5XM1"
+String hmacSuffix = computeHmac(payload); // "A3F7"
+
+// 第4步：组合成完整码
+String code = "CP-2K5XM1-A3F7";
+```
+
+**唯一性来自两层保证：**
+
+| 层 | 机制 | 保证什么 |
+|----|------|---------|
+| 第1层 | 雪花ID（IdWorker） | ID本身全局唯一（含机器ID+时间戳+序列号） |
+| 第2层 | DB UNIQUE约束（UK_REDEEM_CODE） | 即使生成重复也无法写入，直接报错 |
+
+```sql
+-- 数据库唯一约束兜底
+CONSTRAINT UK_REDEEM_CODE UNIQUE (CODE)
+```
+
+---
+
+### 10.3 码是怎么分配给用户的？
+
+**核心设计：码不预先绑定用户，谁先兑谁得**
+
+```
+【错误理解】（不是这样的）：
+  运营 → 生成码 → 提前绑定给指定用户 → 用户只能用自己的码
+
+【正确设计】（本系统）：
+  运营 → 生成一批码 → 通过渠道分发实体码 → 用户输入码 → 先到先得
+
+              ┌── 短信发送码给用户 ──→ 用户A收到CP-2K5XM1-A3F7
+              │
+  500张码 ───┼── 包装印刷（盲盒）──→ 用户B撕开拿到CP-3X7YPQ-B2K9
+              │
+              └── 合作伙伴分发 ────→ 用户C通过APP拿到CP-9ABCDE-Z1X2
+```
+
+**分配时序图：**
+
+```
+运营人员          后台管理系统           Oracle DB             分发渠道
+    │                  │                    │                     │
+    │─ 生成请求 ──────→ │                    │                     │
+    │  模板:话费券50    │                    │                     │
+    │  数量:500张       │                    │                     │
+    │  有效期:3个月     │                    │                     │
+    │                  │─ 创建批次 ─────────→│                     │
+    │                  │  INSERT T_REDEEM_CODE_BATCH               │
+    │                  │                    │                     │
+    │                  │─ 批量生成码 ────────→│                     │
+    │                  │  INSERT 500条       │                     │
+    │                  │  T_COUPON_REDEEM_CODE │                   │
+    │                  │  STATUS=0（未使用）  │                     │
+    │←── 返回batchId ──│                    │                     │
+    │                  │                    │                     │
+    │─ 导出CSV ────────→│                    │                     │
+    │  500张码列表      │                    │                     │
+    │←── 下载文件 ──────│                    │                     │
+    │                  │                    │                     │
+    │── 发给短信平台 ─────────────────────────────────────────────→│
+    │   发给包装厂印刷    │                   │                     │
+    │   发给合作伙伴      │                   │                     │
+
+[之后用户从渠道获得码，自行去APP兑换]
+
+用户                APP/H5              后台API              Oracle DB
+  │                  │                    │                     │
+  │─ 输入码 ─────────→│                    │                     │
+  │  CP-2K5XM1-A3F7  │                    │                     │
+  │                  │─ POST /redeem ─────→│                     │
+  │                  │                    │─ 查询+CAS ──────────→│
+  │                  │                    │  STATUS: 0→1         │
+  │                  │                    │  USER_ID = 'userA'   │
+  │                  │                    │  写GrantTask         │
+  │                  │                    │←── 成功 ─────────────│
+  │                  │                    │─ 创建T_COUPON ───────→│
+  │←─── 兑换成功！ ──────────────────────── │                     │
+  │  "50港币话费券    │                    │                     │
+  │   已发放到账户"   │                    │                     │
+```
+
+---
+
+### 10.4 如何保证同一张码不被两个用户同时兑换？
+
+**三层保证（从快到慢）：**
+
+```
+第1层（最快）：Redisson分布式锁
+  同一个code同时只有1个线程进入业务逻辑
+  另一个请求等待3秒，或直接返回"请稍后重试"
+
+第2层（最可靠）：DB CAS
+  UPDATE T_COUPON_REDEEM_CODE
+  SET STATUS=1, USER_ID='userA'
+  WHERE CODE='CP-2K5XM1-A3F7' AND STATUS=0
+  ↓
+  Oracle行锁保证：无论多少并发，只有1个UPDATE能成功
+  affected=0 → 直接拒绝
+
+第3层（最终兜底）：DB UNIQUE约束
+  T_COUPON 表对 (USER_ID, TEMPLATE_ID) 有限制
+  极端情况下防止重复发券
+```
+
+---
+
+### 10.5 密钥泄露风险分析（员工离职场景）
+
+> "如果生成码的人离职了，HMAC密钥泄露，岂不是很危险？"
+
+**先说结论：有风险，但不是致命的。原因如下：**
+
+#### 密钥泄露后攻击者能做什么？
+
+```
+攻击者拿到HMAC密钥后：
+
+  1. 可以自己计算出任意格式的"合法"码
+     例如：伪造 CP-XXXXXX-签名正确
+     → 能通过第1层HMAC验签 ✅（第1层失效）
+
+  2. 但伪造的码在 T_COUPON_REDEEM_CODE 表里根本没有记录！
+     DB查询：SELECT * WHERE CODE='CP-伪造的' → 0行返回
+     → 第5层DB CAS：直接返回"兑换码不存在" ✅ 仍然拦截
+
+  3. 攻击者能做的最多就是：
+     大量发送格式合法的伪造码请求
+     → 绕过第1层（不查DB直接拒绝）
+     → 直接到达DB查询层，增加DB压力
+     → 第2/3层IP/用户限速仍然有效
+```
+
+**损失对比表：**
+
+| 情况 | 密钥未泄露 | 密钥泄露 |
+|------|---------|---------|
+| 随机枚举攻击成功率 | 极低（签名校验拦截99%） | 签名不再有效，攻击者直接绕过第1层 |
+| DB能被枚举到有效码吗 | ❌ 不能（HMAC拦截） | ❌ 仍然不能（DB里根本没有伪造码记录） |
+| 系统安全吗 | ✅ | ⚠️ 受影响但核心安全（CAS保证不重复兑换） |
+| 主要风险 | 几乎没有 | DB查询压力增加，可能DDoS DB |
+
+**关键结论：**
+```
+HMAC密钥泄露 ≠ 已有的真实码被盗用
+HMAC密钥泄露 = 第1层防护失效，DB压力增加
+
+已经在DB里的500张真实码，攻击者没有密钥也无法批量"猜"到它们
+因为真实码的ID来自雪花算法，攻击者不知道这些ID的具体值
+即使知道密钥，也需要枚举出正确的ID才能生成匹配DB记录的码
+```
+
+---
+
+### 10.6 密钥泄露应对：密钥版本化轮换方案
+
+**当前问题：只有一个密钥，泄露后所有码都受影响**
+
+**解决：密钥版本化（Key Versioning）**
+
+#### ❓ 核心问题：系统怎么知道一张码用的是v1还是v2密钥？
+
+**答案：版本号直接写在码里，一看码就知道用哪个密钥验签。**
+
+```
+v1码（旧格式，3段）：  CP - 2K5XM1 - A3F7
+                       ↑      ↑         ↑
+                     前缀   Base31ID   HMAC签名
+                     没有版本号 → 默认用v1密钥验签
+
+v2码（新格式，4段）：  CP - V2 - 2K5XM1 - B9X3
+                       ↑    ↑      ↑         ↑
+                     前缀  版本  Base31ID   HMAC签名
+                           ↑
+                     直接告诉系统：我是v2码，用v2密钥验签
+```
+
+**验签逻辑（verify方法）：**
+
+```
+用户输入码 → split("-") → 看有几段？
+
+3段 → v1格式 → 用v1密钥验签
+4段 → 看第2段是什么版本 → 用对应密钥验签
+其他 → 直接返回false（格式不对）
+```
+
+#### 新旧码并存时序图
+
+```
+【轮换前】密钥只有v1，active-version=v1
+
+  生成：CP-2K5XM1-A3F7（3段，v1密钥签名）
+  验签：3段 → 用v1密钥 → ✅
+
+────────── 员工离职，v1密钥可能泄露 ──────────
+
+【轮换后】密钥有v1+v2，active-version=v2
+          （滚动重启3实例，无停机）
+
+  新生成：CP-V2-3ABCDE-F7K2（4段，v2密钥签名）
+  旧有码：CP-2K5XM1-A3F7（3段，v1格式，已在DB里）
+
+  用户兑换旧码 CP-2K5XM1-A3F7：
+    verify("CP-2K5XM1-A3F7")
+    → split → 3段 → 用v1密钥验签 → ✅ 通过
+    → 查DB → STATUS=0 → CAS兑换 → 成功
+
+  用户兑换新码 CP-V2-3ABCDE-F7K2：
+    verify("CP-V2-3ABCDE-F7K2")
+    → split → 4段 → 第2段是"V2" → 用v2密钥验签 → ✅ 通过
+    → 查DB → STATUS=0 → CAS兑换 → 成功
+
+  攻击者用泄露的v1密钥伪造码：
+    伪造 CP-FAKE99-X1Y2（v1格式，v1密钥签名正确）
+    verify → 3段 → 用v1密钥 → ✅ 通过第1层（v1密钥已泄露！）
+    → 查DB → 0行 → "兑换码不存在" ❌ 第5层拦截
+    （伪造码在DB里没有记录，永远兑换不了）
+
+  等旧v1码全部过期/兑换完：
+    删除v1密钥配置
+    攻击者的伪造码连第1层都过不了
+```
+
+#### 码格式扩展：加入版本号
+
+```
+原格式：CP-2K5XM1-A3F7
+新格式：CP-V2-2K5XM1-B9X3
+             ↑
+             版本号，告诉系统"我是用v2密钥生成的"
+```
+
+#### 代码实现（RedeemCodeGenerator，已在源码中）
+
+```java
+// 生成：用当前激活版本的密钥
+public String generate(Long id) {
+    String idPart = toSafeBase(id);
+    if ("v1".equals(activeVersion)) {
+        // v1：保持原有3段格式（兼容旧系统）
+        String payload = PREFIX + "-" + idPart;        // "CP-2K5XM1"
+        return payload + "-" + computeHmac("v1", payload); // "CP-2K5XM1-A3F7"
+    } else {
+        // v2+：4段格式，版本号嵌入码中
+        String versionTag = activeVersion.toUpperCase();   // "V2"
+        String payload = PREFIX + "-" + versionTag + "-" + idPart; // "CP-V2-3ABCDE"
+        return payload + "-" + computeHmac(activeVersion, payload); // "CP-V2-3ABCDE-F7K2"
+    }
+}
+
+// 验签：看段数 → 自动判断版本 → 选对应密钥
+public boolean verify(String code) {
+    String[] parts = code.toUpperCase().trim().split("-");
+
+    if (parts.length == 3) {
+        // v1格式（旧码）：CP-XXXXXX-YYYY
+        // 不管当前active-version是什么，这类码永远用v1密钥验签
+        if (!PREFIX.equals(parts[0])) return false;
+        String payload = parts[0] + "-" + parts[1];
+        return computeHmac("v1", payload).equals(parts[2]);
+
+    } else if (parts.length == 4) {
+        // v2+格式（新码）：CP-V2-XXXXXX-YYYY
+        // 从码本身读版本号，去找对应密钥
+        if (!PREFIX.equals(parts[0])) return false;
+        String version = parts[1].toLowerCase();  // "V2" → "v2"
+        if (!hmacMap.containsKey(version)) {
+            // 这个版本的密钥已经被删了（旧码已过期，删除了旧密钥）
+            log.warn("[验签] 密钥版本[{}]已不存在，该码可能已过期或使用已删除密钥", version);
+            return false;
+        }
+        String payload = parts[0] + "-" + parts[1] + "-" + parts[2];
+        return computeHmac(version, payload).equals(parts[3]);
+
+    } else {
+        return false;  // 段数不对，格式错误
+    }
+}
+```
+
+#### 密钥轮换流程（员工离职时）
+
+```
+步骤1：生成新密钥v2（安全的机器上生成，不经过任何人的电脑）
+  openssl rand -hex 32 → 新密钥字符串
+
+步骤2：把v2注入K8s Secret（不修改代码，不提交git）
+  kubectl create secret generic coupon-secrets \
+    --from-literal=COUPON_HMAC_SECRET_V1=旧密钥 \  ← 保留，旧3段码需要验签
+    --from-literal=COUPON_HMAC_SECRET_V2=新密钥 \  ← 新增
+    --from-literal=HMAC_ACTIVE_VERSION=v2          ← 切换，新码生成用v2
+
+步骤3：滚动重启3个实例（不停机）
+  新生成的码全部是4段v2格式（CP-V2-XXXX-YYYY）
+  已有的旧3段码（CP-XXXX-YYYY）仍然可以用v1密钥验签
+
+步骤4：等所有v1旧码过期后，删除v1密钥配置
+  通常1-3个月活动周期结束后执行
+
+步骤5：删除v1密钥 → 旧码连第1层都过不了（HMAC验签找不到v1密钥）
+  kubectl create secret generic coupon-secrets \
+    --from-literal=COUPON_HMAC_SECRET_V2=新密钥 \  ← 只保留v2
+    --from-literal=HMAC_ACTIVE_VERSION=v2
+```
+
+#### application.yml 对应配置
+
+```yaml
+coupon:
+  code:
+    hmac:
+      active-version: ${HMAC_ACTIVE_VERSION:v1}
+      secret-v1: ${COUPON_HMAC_SECRET_V1:}   # 旧密钥（从K8s Secret注入）
+      secret-v2: ${COUPON_HMAC_SECRET_V2:}   # 新密钥（从K8s Secret注入）
+```
+
+---
+
+### 10.7 密钥安全管理：最佳实践
+
+#### 密钥不应该在哪里
+
+```
+❌ 不能在：
+  application.yml（提交到git就泄露）
+  代码注释里
+  Slack/钉钉/邮件（离职员工还能看到历史消息）
+  开发者本地文件
+  CI/CD流水线的明文参数
+```
+
+#### 密钥应该在哪里
+
+```
+✅ 应该在：
+  K8s Secret（加密存储在etcd）
+    kubectl create secret generic coupon-secrets \
+      --from-literal=COUPON_HMAC_SECRET=xxx
+    在deployment.yaml通过env引用，不暴露明文
+
+  HashiCorp Vault（专业密钥管理）
+    Vault负责密钥轮换、访问审计、自动过期
+    应用通过Vault Agent自动获取密钥，开发者不接触
+
+  Nacos配置中心（加密配置）
+    使用AES加密的cipher:xxx配置值
+    解密密钥只有运维知道
+```
+
+#### K8s生产配置示例
+
+```yaml
+# k8s/deployment.yaml
+env:
+  - name: COUPON_HMAC_SECRET_V1
+    valueFrom:
+      secretKeyRef:
+        name: coupon-secrets
+        key: hmac-secret-v1
+  - name: COUPON_HMAC_SECRET_V2
+    valueFrom:
+      secretKeyRef:
+        name: coupon-secrets
+        key: hmac-secret-v2
+  - name: HMAC_ACTIVE_VERSION
+    valueFrom:
+      secretKeyRef:
+        name: coupon-secrets
+        key: hmac-active-version
+  - name: JWT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: coupon-secrets
+        key: jwt-secret
+```
+
+#### 权限隔离原则
+
+```
+开发环境：application-dev.yml 有测试密钥，开发者可见
+测试环境：application-test.yml 有测试密钥，测试人员可见
+生产环境：密钥在K8s Secret，只有DevOps/SRE能看到
+
+员工离职时：
+  立即执行密钥轮换（步骤见10.6）
+  撤销该员工对K8s/Vault的所有访问权限
+  检查是否有其他凭证需要更换（DB密码、Redis密码等）
+```
+
+---
+
+### 10.8 更新后的部署 Checklist（含安全项）
+
+#### 初次上线
+
+- [ ] `pom.xml` → Maven Reload（下载Druid + JWT依赖）
+- [ ] 执行完整 `schema.sql`（含T_GRANT_TASK、UNLOCK_COUNT字段）
+- [ ] **生产密钥必须修改**：
+  - `COUPON_HMAC_SECRET`（至少32位随机字符串）
+  - `JWT_SECRET`（至少32位随机字符串）
+  - `DRUID_PASS`（Druid控制台密码改为强密码）
+- [ ] K8s Secret创建：`kubectl create secret generic coupon-secrets --from-literal=...`
+- [ ] `deployment.yaml` 中密钥通过env引用，不写明文
+
+#### 员工离职安全处理
+
+- [ ] 立即生成新HMAC密钥（`openssl rand -hex 32`）
+- [ ] 更新K8s Secret中的密钥版本（v1→v2）
+- [ ] 滚动重启3个实例（不停机）
+- [ ] 撤销离职员工的K8s / Vault / Nacos访问权限
+- [ ] 记录密钥轮换事件到安全审计日志
+
+#### 多实例注意
+
+- [ ] 三实例使用**相同HMAC密钥**（K8s Secret统一注入，不各自配置）
+- [ ] Nginx 使用**轮询模式**，不配 `ip_hash`
+- [ ] Redis 使用**集群/哨兵模式**，单点故障会导致限速和分布式锁失效
+- [ ] `allow` 配置为内网IP段（Druid控制台不对外暴露）
+
+
