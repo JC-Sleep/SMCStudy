@@ -4,29 +4,40 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import sys.smc.coupon.config.KafkaConfig;
 import sys.smc.coupon.entity.GrantTask;
 import sys.smc.coupon.entity.SeckillActivity;
+import sys.smc.coupon.entity.SeckillOrder;
+import sys.smc.coupon.entity.SeckillRetryTask;
 import sys.smc.coupon.enums.SeckillStatus;
 import sys.smc.coupon.mapper.CouponRedeemCodeMapper;
 import sys.smc.coupon.mapper.GrantTaskMapper;
 import sys.smc.coupon.mapper.SeckillActivityMapper;
+import sys.smc.coupon.mapper.SeckillOrderMapper;
+import sys.smc.coupon.mapper.SeckillRetryTaskMapper;
+import sys.smc.coupon.mq.SeckillOrderKafkaConsumer;
 import sys.smc.coupon.service.CouponService;
 import sys.smc.coupon.service.SeckillService;
 import sys.smc.coupon.service.impl.CouponServiceImpl;
 import sys.smc.coupon.util.DynamicRateLimiterManager;
+import sys.smc.coupon.util.RedisKeys;
 
+import java.time.LocalDateTime;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.List;
-import java.time.LocalDateTime;
 
 /**
  * 优惠券定时任务
  * 2026-04-20 新增：
- *   ① expireRedeemCodes()     — 兑换码过期Job（修复缺失瑕疵）
- *   ② retryPendingGrantTasks()— 发券补偿重试Job（修复分布式事务瑕疵）
+ *   ① expireRedeemCodes()      — 兑换码过期Job
+ *   ② retryPendingGrantTasks() — 发券补偿重试Job
+ * 2026-04-22 新增：
+ *   ③ retrySeckillOrders()     — 秒杀订单重试Job（死信+重试机制）
  */
 @Slf4j
 @Component
@@ -42,10 +53,20 @@ public class CouponScheduledJob {
     private final CouponRedeemCodeMapper redeemCodeMapper;
     private final GrantTaskMapper grantTaskMapper;
     private final CouponServiceImpl couponServiceImpl;
-    // end 2026-04-20 新增
+
+    // 2026-04-22 新增：秒杀订单重试+死信
+    private final SeckillRetryTaskMapper seckillRetryTaskMapper;
+    private final SeckillOrderMapper seckillOrderMapper;
+    private final SeckillOrderKafkaConsumer seckillOrderKafkaConsumer;
+    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final RedisTemplate<String, Object> redisTemplate;
 
     @Value("${seckill.warmup-minutes:10}")
     private int warmupMinutes;
+
+    // ============================================================
+    // 券过期处理
+    // ============================================================
 
     /**
      * 处理过期优惠券 - 每小时执行一次
@@ -58,7 +79,7 @@ public class CouponScheduledJob {
     }
 
     // ============================================================
-    // 2026-04-20 修复：兑换码过期Job（原来只有懒检查，统计数据不准）
+    // 2026-04-20 修复：兑换码过期Job
     // ============================================================
 
     /**
@@ -95,7 +116,7 @@ public class CouponScheduledJob {
     }
 
     // ============================================================
-    // 2026-04-20 修复：发券补偿重试Job（解决分布式事务问题）
+    // 2026-04-20 修复：发券补偿重试Job（兑换码发券本地消息表）
     // ============================================================
 
     /**
@@ -139,15 +160,13 @@ public class CouponScheduledJob {
                     task.getUserId(), task.getUserId(), task.getTemplateId(), 7, "REDEEM_CODE_RETRY");
 
             grantTaskMapper.markSuccess(task.getId(), issued.getId());
-            log.info("[发券补偿Job] 重试成功 taskId={} code={} couponId={}",
-                    task.getId(), task.getRedeemCode(), issued.getId());
+            log.info("[发券补偿Job] 重试成功 taskId={} couponId={}", task.getId(), issued.getId());
 
         } catch (Exception e) {
             // 计算下次重试时间（指数退避）
             int retryCount = task.getRetryCount() != null ? task.getRetryCount() : 0;
             int delayMinutes = retryCount < GrantTask.RETRY_DELAYS_MINUTES.length
-                    ? GrantTask.RETRY_DELAYS_MINUTES[retryCount]
-                    : 60; // 超出预设，默认1小时
+                    ? GrantTask.RETRY_DELAYS_MINUTES[retryCount] : 60; // 超出预设，默认1小时
             Calendar cal = Calendar.getInstance();
             cal.add(Calendar.MINUTE, delayMinutes);
 
@@ -155,16 +174,129 @@ public class CouponScheduledJob {
 
             // 超限时人工告警
             if (retryCount + 1 >= (task.getMaxRetry() != null ? task.getMaxRetry() : 3)) {
-                log.error("[发券补偿Job][人工告警🚨] taskId={} code={} userId={} 重试{}次失败，需人工处理！原因: {}",
-                        task.getId(), task.getRedeemCode(), task.getUserId(),
-                        retryCount + 1, e.getMessage());
-                // TODO: 接入告警系统（Slack/钉钉/邮件）
+                log.error("[发券补偿Job][人工告警🚨] taskId={} code={} 重试{}次失败！reason={}",
+                        task.getId(), task.getRedeemCode(), retryCount + 1, e.getMessage());
             } else {
-                log.warn("[发券补偿Job] 重试失败 taskId={} retryCount={} 下次重试: {}分钟后",
+                log.warn("[发券补偿Job] 重试失败 taskId={} 第{}次 下次{}分钟后",
                         task.getId(), retryCount + 1, delayMinutes);
             }
         }
     }
+
+    // ============================================================
+    // 2026-04-22 新增：秒杀订单消费重试Job（配合死信队列）
+    //
+    // 背景：Kafka消费临时失败（DB抖动、积分服务短暂超时）时
+    //       不再直接标记订单失败，而是写 T_SECKILL_RETRY_TASK
+    //       本Job负责指数退避重试，保护用户权益
+    //
+    // 重试策略（指数退避）：
+    //   第1次失败 → 1分钟后重试
+    //   第2次失败 → 5分钟后重试
+    //   第3次失败 → 30分钟后重试
+    //   超过3次   → 标记订单失败 + 发死信Topic + 告警
+    // ============================================================
+
+    /**
+     * 扫描并重试待处理的秒杀订单（每30秒执行一次）
+     */
+    @Scheduled(cron = "0/30 * * * * ?")
+    public void retrySeckillOrders() {
+        List<SeckillRetryTask> tasks = seckillRetryTaskMapper.selectPendingTasks(LocalDateTime.now());
+        if (tasks.isEmpty()) return;
+
+        log.info("[秒杀重试Job] 发现 {} 个待重试任务", tasks.size());
+        for (SeckillRetryTask task : tasks) {
+            processSeckillRetryTask(task);
+        }
+    }
+
+    private void processSeckillRetryTask(SeckillRetryTask task) {
+        Long orderId = task.getOrderId();
+        int retryCount = task.getRetryCount() == null ? 0 : task.getRetryCount();
+
+        try {
+            // 幂等检查
+            SeckillOrder order = seckillOrderMapper.selectById(orderId);
+            if (order == null) {
+                seckillRetryTaskMapper.markSuccess(task.getId());
+                log.info("[秒杀重试Job] 订单不存在，标记任务完成 taskId={} orderId={}", task.getId(), orderId);
+                return;
+            }
+            if (order.getStatus() != 0) {
+                // 订单已有终态（其他途径处理了），任务完成
+                seckillRetryTaskMapper.markSuccess(task.getId());
+                log.info("[秒杀重试Job] 订单已有终态(status={})，幂等跳过 orderId={}", order.getStatus(), orderId);
+                return;
+            }
+
+            // 重试业务逻辑（与主消费者共用 doProcessOrder）
+            seckillOrderKafkaConsumer.doProcessOrder(order);
+
+            // 重试成功
+            seckillRetryTaskMapper.markSuccess(task.getId());
+            log.info("[秒杀重试Job] 重试成功 ✅ taskId={} orderId={} 累计重试{}次",
+                    task.getId(), orderId, retryCount + 1);
+
+        } catch (SeckillOrderKafkaConsumer.BusinessRejectException e) {
+            // 业务拒绝，不再重试，直接进死信
+            log.warn("[秒杀重试Job] 业务拒绝，直接进死信 orderId={} reason={}", orderId, e.getMessage());
+            forceFailAndSendToDlt(task, orderId, "业务拒绝: " + e.getMessage());
+
+        } catch (Exception e) {
+            int nextRetry = retryCount + 1;
+            int maxRetry = task.getMaxRetry() == null ? SeckillRetryTask.MAX_RETRY_COUNT : task.getMaxRetry();
+
+            if (nextRetry >= maxRetry) {
+                // 超过最大重试次数 → 进死信队列
+                log.error("[秒杀重试Job][死信🚨] taskId={} orderId={} 已重试{}次仍失败！reason={}",
+                        task.getId(), orderId, nextRetry, e.getMessage());
+                forceFailAndSendToDlt(task, orderId, "重试" + nextRetry + "次失败: " + e.getMessage());
+            } else {
+                // 还有重试机会，更新下次重试时间（指数退避）
+                int delayIdx = Math.min(nextRetry - 1, SeckillRetryTask.RETRY_DELAYS_MINUTES.length - 1);
+                int delayMinutes = SeckillRetryTask.RETRY_DELAYS_MINUTES[delayIdx];
+                LocalDateTime nextRetryTime = LocalDateTime.now().plusMinutes(delayMinutes);
+                seckillRetryTaskMapper.markFailed(task.getId(), e.getMessage(), nextRetryTime);
+                log.warn("[秒杀重试Job] 第{}次重试失败 orderId={} {}分钟后再试 reason={}",
+                        nextRetry, orderId, delayMinutes, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * 强制标记订单失败 + 发死信 Topic（触发 SeckillOrderDltConsumer 处理）
+     */
+    private void forceFailAndSendToDlt(SeckillRetryTask task, Long orderId, String reason) {
+        // 1. 标记重试任务为失败超限
+        try {
+            seckillRetryTaskMapper.markFailed(task.getId(), reason, LocalDateTime.now());
+        } catch (Exception e) {
+            log.error("[死信] 更新重试任务状态失败 taskId={}", task.getId(), e);
+        }
+
+        // 2. 标记订单为失败
+        try {
+            SeckillOrder order = seckillOrderMapper.selectById(orderId);
+            if (order != null && order.getStatus() == 0) {
+                seckillOrderKafkaConsumer.markOrderFailed(order, reason);
+            }
+        } catch (Exception e) {
+            log.error("[死信] 标记订单失败异常 orderId={}", orderId, e);
+        }
+
+        // 3. 发消息到死信 Topic（触发 SeckillOrderDltConsumer 告警）
+        try {
+            kafkaTemplate.send(KafkaConfig.TOPIC_SECKILL_ORDER_DLT, orderId.toString());
+            log.error("[死信] 已发送到死信Topic orderId={}", orderId);
+        } catch (Exception e) {
+            log.error("[死信] 发送死信Topic失败 orderId={}，请人工处理！reason={}", orderId, reason, e);
+        }
+    }
+
+    // ============================================================
+    // 秒杀活动状态管理（原有，保持不变）
+    // ============================================================
 
     /**
      * 秒杀活动库存预热 - 每分钟检查一次
@@ -173,7 +305,7 @@ public class CouponScheduledJob {
     public void warmUpSeckillStock() {
         LocalDateTime now = LocalDateTime.now();
         LocalDateTime warmupTime = now.plusMinutes(warmupMinutes);
-        
+
         // 查询即将开始的活动(未开始且在预热时间范围内)
         List<SeckillActivity> upcomingActivities = seckillActivityMapper.selectList(
                 new LambdaQueryWrapper<SeckillActivity>()
@@ -184,7 +316,7 @@ public class CouponScheduledJob {
         );
 
         for (SeckillActivity activity : upcomingActivities) {
-            log.info("预热秒杀活动: id={}, name={}, startTime={}", 
+            log.info("预热秒杀活动: id={}, name={}, startTime={}",
                     activity.getId(), activity.getName(), activity.getStartTime());
             seckillService.warmUpStock(activity);
         }
@@ -192,15 +324,15 @@ public class CouponScheduledJob {
 
     /**
      * 更新秒杀活动状态 - 每分钟执行一次
-     * 
+     *
      * 2026-03-26 优化：智能判断活动是否真正结束
      */
     @Scheduled(cron = "0 * * * * ?")
     public void updateSeckillActivityStatus() {
         LocalDateTime now = LocalDateTime.now();
-        
+
         // 1. 将已到开始时间的活动状态更新为进行中
-        seckillActivityMapper.update(null, 
+        seckillActivityMapper.update(null,
                 new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<SeckillActivity>()
                         .set(SeckillActivity::getStatus, SeckillStatus.ONGOING.getCode())
                         .eq(SeckillActivity::getStatus, SeckillStatus.PENDING.getCode())
@@ -208,50 +340,50 @@ public class CouponScheduledJob {
                         .gt(SeckillActivity::getEndTime, now)
                         .eq(SeckillActivity::getDeleted, 0)
         );
-        
+
         // 2026-03-26 优化：智能判断活动是否真正结束
         // 2. 检查已过结束时间的活动
         List<SeckillActivity> endingActivities = seckillActivityMapper.selectList(
                 new LambdaQueryWrapper<SeckillActivity>()
-                        .in(SeckillActivity::getStatus, 
-                                SeckillStatus.PENDING.getCode(), 
+                        .in(SeckillActivity::getStatus,
+                                SeckillStatus.PENDING.getCode(),
                                 SeckillStatus.ONGOING.getCode())
                         .le(SeckillActivity::getEndTime, now)
                         .eq(SeckillActivity::getDeleted, 0)
         );
-        
+
         for (SeckillActivity activity : endingActivities) {
             checkAndFinishActivity(activity);
         }
         // end 2026-03-26 优化
     }
-    
+
     // 2026-03-26 新增
     /**
      * 检查并完成活动
-     * 
+     *
      * 活动真正结束的条件：
      * 1. endTime已过
      * 2. DB库存=0（真没库存了）
      * 3. 无待处理订单（所有订单都处理完了）
-     * 
+     *
      * 为什么需要这样？
      * - 即使endTime过了，如果还有待处理订单，可能会失败回滚库存
      * - 应该等所有订单都处理完，确认DB库存=0，才真正结束
      */
     private void checkAndFinishActivity(SeckillActivity activity) {
         Long activityId = activity.getId();
-        
+
         // 1. 检查DB真实库存
         int dbStock = activity.getRemainStock();
-        
+
         // 2. 检查待处理订单数量
         long pendingCount = seckillOrderMapper.selectCount(
                 new LambdaQueryWrapper<SeckillOrder>()
                         .eq(SeckillOrder::getActivityId, activityId)
                         .eq(SeckillOrder::getStatus, 0) // 待处理
         );
-        
+
         // 3. 判断是否真正结束
         if (dbStock == 0 && pendingCount == 0) {
             // 真正结束：DB无库存 + 无待处理订单
@@ -260,27 +392,26 @@ public class CouponScheduledJob {
                             .set(SeckillActivity::getStatus, SeckillStatus.FINISHED.getCode())
                             .eq(SeckillActivity::getId, activityId)
             );
-            
+
             // 清理Redis缓存
             String stockKey = RedisKeys.getSeckillStockKey(activityId);
             String activityKey = RedisKeys.getSeckillActivityKey(activityId);
             redisTemplate.delete(stockKey);
             redisTemplate.delete(activityKey);
-            
-            log.info("秒杀活动真正结束: activityId={}, name={}, endTime已过且DB库存=0且无待处理订单", 
-                    activityId, activity.getName());
+
+            log.info("秒杀活动真正结束: activityId={}, name={}", activityId, activity.getName());
         } else {
             // 还有库存或待处理订单，暂不结束
-            log.info("秒杀活动endTime已过但暂不结束: activityId={}, DB库存={}, 待处理订单={}", 
+            log.info("秒杀活动endTime已过但暂不结束: activityId={}, DB库存={}, 待处理订单={}",
                     activityId, dbStock, pendingCount);
         }
     }
     // end 2026-03-26 新增
-    
+
     // 2026-03-26 新增
     /**
      * 动态调整限流器 - 每5秒执行一次（优化版）
-     * 
+     *
      * 优化：只处理进行中的活动，节省资源
      */
     @Scheduled(fixedRate = 5000)
@@ -291,12 +422,12 @@ public class CouponScheduledJob {
                         .eq(SeckillActivity::getStatus, SeckillStatus.ONGOING.getCode())
                         .eq(SeckillActivity::getDeleted, 0)
         );
-        
+
         if (ongoingActivities.isEmpty()) {
             log.debug("当前无进行中的秒杀活动，跳过限流调整");
             return;
         }
-        
+
         for (SeckillActivity activity : ongoingActivities) {
             try {
                 dynamicRateLimiterManager.adjustRateIfNeeded(activity.getId());
@@ -304,18 +435,18 @@ public class CouponScheduledJob {
                 log.error("动态调整限流失败: activityId={}", activity.getId(), e);
             }
         }
-        
+
         log.debug("动态限流调整完成，处理了 {} 个活动", ongoingActivities.size());
     }
-    
+
     /**
      * 检查进行中活动是否售罄 - 每30秒执行一次
-     * 
+     *
      * 场景：
      * - 活动还没到endTime
      * - 但DB库存=0 且 无待处理订单
      * - 应该自动标记为"已售罄"
-     * 
+     *
      * 为什么需要这个？
      * - 提前售罄可以让Job停止无效处理
      * - 提前标记状态，前端可以显示"已售罄"而不是等到endTime
@@ -329,45 +460,43 @@ public class CouponScheduledJob {
                         .eq(SeckillActivity::getStatus, SeckillStatus.ONGOING.getCode())
                         .eq(SeckillActivity::getDeleted, 0)
         );
-        
+
         for (SeckillActivity activity : ongoingActivities) {
             Long activityId = activity.getId();
-            
+
             // 1. 检查DB库存
             if (activity.getRemainStock() > 0) {
                 continue; // 还有库存，跳过
             }
-            
+
             // 2. 检查待处理订单
             long pendingCount = seckillOrderMapper.selectCount(
                     new LambdaQueryWrapper<SeckillOrder>()
                             .eq(SeckillOrder::getActivityId, activityId)
                             .eq(SeckillOrder::getStatus, 0)
             );
-            
+
             if (pendingCount > 0) {
-                log.debug("活动库存为0但有待处理订单，暂不标记售罄: activityId={}, 待处理={}", 
+                log.debug("活动库存为0但有待处理订单，暂不标记售罄: activityId={}, 待处理={}",
                         activityId, pendingCount);
                 continue; // 有待处理订单，可能会回滚库存
             }
-            
+
             // 3. DB库存=0 且 无待处理订单 → 标记为已售罄
             seckillActivityMapper.update(null,
                     new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<SeckillActivity>()
                             .set(SeckillActivity::getStatus, SeckillStatus.SOLD_OUT.getCode())
                             .eq(SeckillActivity::getId, activityId)
             );
-            
+
             // 清理Redis缓存
             String stockKey = RedisKeys.getSeckillStockKey(activityId);
             String activityKey = RedisKeys.getSeckillActivityKey(activityId);
             redisTemplate.delete(stockKey);
             redisTemplate.delete(activityKey);
-            
-            log.info("秒杀活动提前售罄: activityId={}, name={}, DB库存=0且无待处理订单", 
-                    activityId, activity.getName());
+
+            log.info("秒杀活动提前售罄: activityId={}, name={}", activityId, activity.getName());
         }
     }
     // end 2026-03-26 新增
 }
-

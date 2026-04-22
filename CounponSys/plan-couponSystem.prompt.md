@@ -46,6 +46,8 @@
 > - ✅ **瑕疵修复：requestId幂等实现** (2026-04-20 修复) — Redis缓存5分钟，Controller传参，Service查缓存
 > - ✅ **瑕疵修复：JWT身份认证** (2026-04-20 修复) — JwtUtil+JwtAuthFilter+SecurityConfig，接口分USER/ADMIN权限
 > - ✅ **瑕疵修复：UNLOCK_COUNT解锁保护** (2026-04-20 修复) — selfUnlock/adminUnlock，STATUS=1禁止解锁，>=2次强制人工
+> - ✅ **Kafka死信队列（DLT）** (2026-04-22 新增) — KafkaConfig新增TOPIC_SECKILL_ORDER_DLT，SeckillOrderDltConsumer持久化失败订单+打印人工处理告警日志
+> - ✅ **Kafka重试队列（指数退避）** (2026-04-22 新增) — T_SECKILL_RETRY_TASK表+SeckillRetryTaskMapper+retrySeckillOrders Job，临时故障1/5/30分钟指数退避重试，3次超限→发死信Topic，保护用户权益
 >
 > **性能指标**: 支持千万级用户，5-10W QPS并发，Redis压力↓70%，Kafka消费速度↑100%，积压恢复速度↑5.5倍
 

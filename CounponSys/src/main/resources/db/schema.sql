@@ -294,4 +294,39 @@ CREATE INDEX IDX_GRANT_TASK_CODE   ON T_GRANT_TASK(REDEEM_CODE);
 -- COMMENT ON COLUMN T_REDEEM_CODE_BATCH.MAX_PER_USER  IS '同一批次同一用户最多可兑换张数';
 
 
+-- =============================================
+-- 2026-04-22 新增：秒杀订单消费重试任务表
+-- 解决 Kafka 消费失败直接标记订单失败的问题
+-- 临时故障（DB抖动、积分服务超时）时保护用户权益
+--
+-- 工作流程：
+--   Kafka消费失败(临时异常) → 写此表(status=0)
+--   → CouponScheduledJob.retrySeckillOrders() 每30s扫描
+--   → 指数退避重试：1min → 5min → 30min
+--   → 3次仍失败 → status=2 + 发死信Topic + SeckillOrderDltConsumer告警
+-- =============================================
+CREATE TABLE T_SECKILL_RETRY_TASK (
+    ID              NUMBER(19)      PRIMARY KEY,
+    ORDER_ID        NUMBER(19)      NOT NULL,       -- 关联 T_SECKILL_ORDER.ID
+    ACTIVITY_ID     NUMBER(19)      NOT NULL,       -- 关联活动ID（日志用）
+    USER_ID         VARCHAR2(50)    NOT NULL,       -- 用户ID（告警用）
+    -- 0=待重试  1=重试成功  2=失败超限（需人工处理）
+    STATUS          NUMBER(1)       DEFAULT 0,
+    RETRY_COUNT     NUMBER(3)       DEFAULT 0,      -- 已重试次数
+    MAX_RETRY       NUMBER(3)       DEFAULT 3,      -- 最大重试次数
+    FAIL_REASON     VARCHAR2(500),                  -- 最后一次失败原因
+    -- 下次重试时间（指数退避：第1次1min, 第2次5min, 第3次30min）
+    NEXT_RETRY_TIME TIMESTAMP,
+    CREATE_TIME     TIMESTAMP       DEFAULT SYSTIMESTAMP,
+    UPDATE_TIME     TIMESTAMP       DEFAULT SYSTIMESTAMP
+);
 
+COMMENT ON TABLE  T_SECKILL_RETRY_TASK              IS '秒杀订单消费重试任务表（保护用户权益，替代直接失败）';
+COMMENT ON COLUMN T_SECKILL_RETRY_TASK.STATUS       IS '任务状态:0待重试,1重试成功,2失败超限需人工';
+COMMENT ON COLUMN T_SECKILL_RETRY_TASK.RETRY_COUNT  IS '已重试次数，达到MAX_RETRY后STATUS→2进死信';
+COMMENT ON COLUMN T_SECKILL_RETRY_TASK.NEXT_RETRY_TIME IS '下次重试时间，指数退避：1/5/30分钟';
+
+-- 查询索引：Job扫描待重试任务用
+CREATE INDEX IDX_SECKILL_RETRY_PENDING ON T_SECKILL_RETRY_TASK(STATUS, NEXT_RETRY_TIME);
+-- 关联查询索引
+CREATE INDEX IDX_SECKILL_RETRY_ORDER   ON T_SECKILL_RETRY_TASK(ORDER_ID);
