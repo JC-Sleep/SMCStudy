@@ -190,6 +190,12 @@ public class PaymentTransaction extends BaseEntity {
     private String remarks;
 
     /**
+     * 已退款金额合计（多次部分退款累加，用于判断是否可继续退款）
+     */
+    @TableField("TOTAL_REFUNDED_AMOUNT")
+    private java.math.BigDecimal totalRefundedAmount;
+
+    /**
      * 错误信息
      */
     @TableField("ERROR_MESSAGE")

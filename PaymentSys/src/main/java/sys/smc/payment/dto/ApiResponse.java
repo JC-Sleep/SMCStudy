@@ -46,6 +46,13 @@ public class ApiResponse<T> implements Serializable {
     }
 
     /**
+     * 成功响应（带消息，无数据）- 用于异步操作提示
+     */
+    public static <T> ApiResponse<T> success(T data, String message) {
+        return new ApiResponse<>(0, message, data);
+    }
+
+    /**
      * 失败响应
      */
     public static <T> ApiResponse<T> error(String message) {

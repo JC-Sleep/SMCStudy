@@ -359,8 +359,10 @@ public class PaymentServiceEnhanced {
             throw new PaymentException("原交易不存在");
         }
 
-        // 退款中/已退款/失败等非SUCCESS状态，直接拒绝
-        if (!PaymentStatus.SUCCESS.name().equals(transaction.getPaymentStatus())) {
+        // 只有 SUCCESS 或 PARTIALLY_REFUNDED 才允许发起退款
+        boolean refundable = PaymentStatus.SUCCESS.name().equals(transaction.getPaymentStatus())
+                || PaymentStatus.PARTIALLY_REFUNDED.name().equals(transaction.getPaymentStatus());
+        if (!refundable) {
             throw new PaymentException("当前状态不允许退款，状态：" + transaction.getPaymentStatus());
         }
 
@@ -397,13 +399,22 @@ public class PaymentServiceEnhanced {
         try {
             GatewayRefundResponse response = gateway.refund(request);
 
-            // ── Step 3a：网关成功 → REFUNDED ──────────────────────────────
+            // ── Step 3a：网关成功 → 计算累计退款金额，决定最终状态 ─────────
             PaymentTransaction finalUpdate = new PaymentTransaction();
             finalUpdate.setId(transaction.getId());
-            // 不设置version → MyBatis-Plus不加version条件 → 直接更新（此时已是REFUNDING的独占状态）
             if (response.isSuccess()) {
-                finalUpdate.setPaymentStatus(PaymentStatus.REFUNDED.name());
-                log.info("退款成功，交易ID：{}，退款单号：{}", transaction.getTransactionId(), request.getRefundNo());
+                java.math.BigDecimal prevRefunded = transaction.getTotalRefundedAmount() != null
+                        ? transaction.getTotalRefundedAmount() : java.math.BigDecimal.ZERO;
+                java.math.BigDecimal newTotal = prevRefunded.add(request.getRefundAmount());
+                finalUpdate.setTotalRefundedAmount(newTotal);
+
+                // 全额退款 → REFUNDED（终态），部分退款 → PARTIALLY_REFUNDED（可继续退）
+                boolean fullyRefunded = newTotal.compareTo(transaction.getAmount()) >= 0;
+                finalUpdate.setPaymentStatus(
+                        fullyRefunded ? PaymentStatus.REFUNDED.name() : PaymentStatus.PARTIALLY_REFUNDED.name());
+                log.info("退款成功，交易ID：{}，退款金额：{}，累计已退：{}，状态→{}",
+                        transaction.getTransactionId(), request.getRefundAmount(), newTotal,
+                        finalUpdate.getPaymentStatus());
             } else {
                 // ── Step 3b：网关业务失败（如余额不足等）→ REFUND_FAILED ────
                 finalUpdate.setPaymentStatus(PaymentStatus.REFUND_FAILED.name());

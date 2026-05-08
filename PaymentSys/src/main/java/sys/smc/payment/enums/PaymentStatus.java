@@ -46,7 +46,13 @@ public enum PaymentStatus {
     REFUND_FAILED("退款失败"),
 
     /**
-     * 已退款
+     * 部分退款（支持多次部分退款场景）
+     * 已退款金额 < 原始金额，可继续申请退款
+     */
+    PARTIALLY_REFUNDED("部分退款"),
+
+    /**
+     * 已全额退款（终态）
      */
     REFUNDED("已退款");
 

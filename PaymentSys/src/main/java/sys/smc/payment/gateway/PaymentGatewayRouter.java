@@ -31,28 +31,33 @@ public class PaymentGatewayRouter {
 
     /**
      * 支付方式 -> 可用网关列表映射
+     * @deprecated 已删除：此 Map 从未被填充也从未被使用，是死代码。
+     *             路由逻辑统一在 selectGateway() 实时计算。
      */
-    private final Map<String, List<PaymentGateway>> paymentMethodGatewayMap = new ConcurrentHashMap<>();
+    // private final Map<String, List<PaymentGateway>> paymentMethodGatewayMap = new ConcurrentHashMap<>();
 
     /**
      * 初始化路由表
+     *
+     * Bug修复：原代码跳过 isAvailable()=false 的网关，导致配置补全后必须重启才能路由。
+     * 修复方案：始终注册所有网关，isAvailable() 检查移到请求时实时判断。
      */
     @PostConstruct
     public void init() {
         log.info("初始化支付网关路由器...");
-        
+
         for (PaymentGateway gateway : gateways) {
             PaymentChannel channel = gateway.getChannel();
-            
-            if (gateway.isAvailable()) {
-                gatewayMap.put(channel, gateway);
-                log.info("注册支付网关: {} - {}", channel.getCode(), gateway.getChannelName());
-            } else {
-                log.warn("支付网关不可用（配置缺失）: {}", channel.getCode());
-            }
+            // 无论 isAvailable() 是否为 true，都注册进 Map
+            // isAvailable() 状态可能随配置动态变化（如运营时补充了 API Key）
+            gatewayMap.put(channel, gateway);
+            log.info("注册支付网关: {} - {} (available={})",
+                    channel.getCode(), gateway.getChannelName(), gateway.isAvailable());
         }
-        
-        log.info("支付网关路由器初始化完成，已注册 {} 个网关", gatewayMap.size());
+
+        long availableCount = gatewayMap.values().stream().filter(PaymentGateway::isAvailable).count();
+        log.info("支付网关路由器初始化完成，共注册 {} 个网关，其中 {} 个当前可用",
+                gatewayMap.size(), availableCount);
     }
 
     /**
@@ -99,6 +104,11 @@ public class PaymentGatewayRouter {
         }
         
         if (availableGateways.isEmpty()) {
+            // 路由失败时输出所有渠道状态，方便排查（哪个渠道没配 API Key 等）
+            StringBuilder diagnosis = new StringBuilder("已注册渠道状态：");
+            gatewayMap.forEach((ch, gw) ->
+                    diagnosis.append(ch.getCode()).append("=").append(gw.isAvailable() ? "可用" : "不可用").append(" "));
+            log.error("没有支持支付方式 [{}] 的可用网关。{}", paymentMethod, diagnosis);
             throw new GatewayException("没有支持该支付方式的可用网关: " + paymentMethod);
         }
         

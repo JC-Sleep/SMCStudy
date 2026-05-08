@@ -1,4 +1,4 @@
-iupackage sys.smc.payment.config;
+package sys.smc.payment.config;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -12,6 +12,7 @@ import sys.smc.payment.dto.ApiResponse;
 import sys.smc.payment.exception.GatewayException;
 import sys.smc.payment.exception.OptimisticLockException;
 import sys.smc.payment.exception.PaymentException;
+import sys.smc.payment.exception.UnauthorizedException;
 
 import java.util.stream.Collectors;
 
@@ -30,6 +31,19 @@ public class GlobalExceptionHandler {
     public ApiResponse<?> handlePaymentException(PaymentException e) {
         log.error("支付异常：{}", e.getMessage(), e);
         return ApiResponse.error(e.getMessage());
+    }
+
+    /**
+     * 未授权异常（401 未登录 / 403 无权限）
+     */
+    @ExceptionHandler(UnauthorizedException.class)
+    public org.springframework.http.ResponseEntity<ApiResponse<?>> handleUnauthorizedException(
+            UnauthorizedException e) {
+        log.warn("权限异常：{}", e.getMessage());
+        ApiResponse<?> body = ApiResponse.error(e.getHttpStatus(), e.getMessage());
+        return org.springframework.http.ResponseEntity
+                .status(e.getHttpStatus())
+                .body(body);
     }
 
     /**
