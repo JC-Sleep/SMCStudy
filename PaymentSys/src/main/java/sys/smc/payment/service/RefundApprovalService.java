@@ -16,7 +16,6 @@ import sys.smc.payment.mapper.RefundApplicationMapper;
 import sys.smc.payment.mapper.RefundAuditLogMapper;
 import sys.smc.payment.security.RequireFinance;
 import sys.smc.payment.security.UserContext;
-
 import java.util.Date;
 import java.util.List;
 
@@ -46,6 +45,9 @@ public class RefundApprovalService {
 
     @Autowired
     private RefundExecutionService refundExecutionService;  // 独立 @Service，@Async 才能生效
+
+    @Autowired
+    private AuthService authService;  // 高风险操作：二次从 DB 验权
 
     // ─────────────────────────────────────────────────────────
     // 查询接口
@@ -99,6 +101,9 @@ public class RefundApprovalService {
 
         // ── 1. 加载申请单 ─────────────────────────────────────────────────
         RefundApplication app = applicationMapper.selectById(request.getApplicationId());
+
+        // ── ⭐ 二次从 DB 验证财务权限（防止 Token 盗用、角色已被撤销的场景）──
+        authService.verifyRoleFromDB(finance.getUserId(), "FINANCE");
         if (app == null) {
             throw new PaymentException("退款申请不存在");
         }
@@ -209,4 +214,8 @@ public class RefundApprovalService {
         auditLogMapper.insert(auditLog);
     }
 }
+
+
+
+
 
