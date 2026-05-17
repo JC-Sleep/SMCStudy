@@ -14,7 +14,6 @@
         <module name="FirstProvider-nacos" />
         <module name="BacaList_add_data" />
         <module name="DailySettmentCase" />
-        <module name="PaymentSys" />
         <module name="CounponSys" />
         <module name="Eureka" />
         <module name="FirstProvider-A" />
@@ -29,7 +28,7 @@
       <module name="Eureka" options="-parameters" />
       <module name="FirstProvider-A" options="-parameters" />
       <module name="FirstProvider-nacos" options="-parameters" />
-      <module name="PaymentSys" options="-parameters" />
+      <module name="PaymentSys" options="" />
     </option>
   </component>
 </project>
