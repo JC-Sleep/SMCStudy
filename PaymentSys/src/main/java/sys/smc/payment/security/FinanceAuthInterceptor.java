@@ -49,4 +49,3 @@ public class FinanceAuthInterceptor implements HandlerInterceptor {
         return true;
     }
 }
-

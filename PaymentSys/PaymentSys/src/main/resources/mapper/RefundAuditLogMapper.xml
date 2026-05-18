@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="sys.smc.payment.mapper.RefundAuditLogMapper">
+
+    <!-- 按申请ID查全部审计日志，时间升序（展示完整操作流水） -->
+    <select id="selectByApplicationId" resultType="sys.smc.payment.entity.RefundAuditLog">
+        SELECT
+            ID, APPLICATION_ID, TRANSACTION_ID,
+            ACTION, OPERATOR_USER_ID, OPERATOR_GROUP_ID,
+            OPERATOR_PARENT_GROUP_ID, OPERATOR_IP,
+            REMARK, CREATE_TIME
+        FROM REFUND_AUDIT_LOG
+        WHERE APPLICATION_ID = #{applicationId}
+        ORDER BY CREATE_TIME ASC
+    </select>
+
+</mapper>
+

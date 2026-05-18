@@ -42,4 +42,3 @@ public class SysGroup {
     @TableField("UPDATE_TIME")
     private Date updateTime;
 }
-

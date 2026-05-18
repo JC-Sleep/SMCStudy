@@ -32,4 +32,3 @@ public class UserContextHolder {
         return ctx != null ? ctx.getUserId() : "ANONYMOUS";
     }
 }
-

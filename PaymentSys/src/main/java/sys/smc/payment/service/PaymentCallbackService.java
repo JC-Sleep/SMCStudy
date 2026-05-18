@@ -71,7 +71,11 @@ public class PaymentCallbackService {
             PaymentGateway gateway = gatewayRouter.getGateway(channel);
 
             // 1. 验证签名
-            String signature = headers.get("X-Signature");
+            // ⚠️ 不同渠道签名 Header 不同：
+            //   CyberSource → v-c-signature
+            //   SCB         → X-Signature
+            // 优先取 v-c-signature，降级到 X-Signature，保持向后兼容。
+            String signature = headers.getOrDefault("v-c-signature", headers.get("X-Signature"));
             boolean signatureValid = gateway.verifyCallback(rawBody, signature, headers);
             callbackLog.setSignatureValid(signatureValid ? 1 : 0);
             callbackLog.setSignatureValue(signature);

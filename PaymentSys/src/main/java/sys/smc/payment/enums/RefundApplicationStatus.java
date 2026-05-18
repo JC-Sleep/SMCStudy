@@ -37,4 +37,3 @@ public enum RefundApplicationStatus {
         return description;
     }
 }
-

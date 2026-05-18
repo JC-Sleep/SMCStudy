@@ -42,4 +42,3 @@ public class RefundApplicationVO {
     /** 该交易已完成的退款次数 */
     private int completedRefundCount;
 }
-

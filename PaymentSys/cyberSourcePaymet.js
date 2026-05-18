@@ -1,0 +1,905 @@
+var Payment = {};
+
+function ApplePay_showMessageText(sContent){
+    try{
+        document.getElementById("status_text").innerHTML = sContent;
+        document.getElementById("status_text").style.display = "inline-block";
+    }
+    catch (Err){
+        console.log('ApplePay_showMessageText error:'+Err);
+    }
+}
+function ApplePay_updatePaymentDesc(sLang){
+    try{
+        const sDec =((sLang==="english")?"Use Apple Pay for payment":"透過Apple Pay付款");
+        document.getElementById("id_paymentDesc").innerHTML = sDec;
+    }
+    catch (Err){
+        console.log('ApplePay_updatePaymentDesc error:'+Err);
+    }
+}
+
+function ApplePay_showSpinner(){
+    try{
+        document.getElementById("spinner").style.display = "inline-block";
+    }
+    catch (Err){
+        console.log('ApplePay_showSpinner error:'+Err);
+    }
+}
+function ApplePay_closeSpinner(){
+    try{
+        document.getElementById("spinner").style.display = "none";
+    }
+    catch (Err){
+        console.log('ApplePay_closeSpinner error:'+Err);
+    }
+}
+function ApplePay_closeContinueButton(){
+    try{
+        document.getElementById("id_continueButton").style.display = "none";
+    }
+    catch (Err){
+        console.log('ApplePay_closeContinueButton error:'+Err);
+    }
+}
+function ApplePay_closeFormContainer(){
+    try{
+        document.getElementById("id_formContainer").style.display = "none";
+    }
+    catch (Err){
+        console.log('ApplePay_closeFormContainer error:'+Err);
+    }
+}
+
+function ApplePay_showMessage(sMessage){
+    ApplePay_closeFormContainer();
+    ApplePay_showMessageText(sMessage);
+    ApplePay_closeContinueButton();
+    ApplePay_closeSpinner();
+}
+function isEmpty(obj) {
+  for (const prop in obj) {
+    if (Object.hasOwn(obj, prop)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+//***copy from payment_display.js start
+var ApplePay_billPayment = function(){
+  return ( sGlobal_sid == "care" && ApplePay_isMobile() && !ApplePay_checkFromApp() );
+}
+
+var ApplePay_isMobile = function(){
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+}
+
+function ApplePay_isAppleDevice() {
+    return /iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent) && !window.MSStream;
+}
+
+function ApplePay_Redirect(sURL) {
+  if (ApplePay_billPayment()){
+    return;
+  }
+	window.location.href = sURL;
+	//window.location='http://webstage7a.smartone.com/jsp/testing/test_transaction.jsp?v=J4';
+}
+
+var ApplePay_checkFromApp = function(){
+	if(navigator.userAgent.toLowerCase().indexOf("appuat-stcare") > -1){
+		return true;
+	} else if ( (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) && (!window.MSStream) ){
+		//for iPad iOS 13
+		return true;
+	}
+	return false;
+}
+//***copy from payment_display.js end
+
+async function ApplePay_createOrder() {
+    WriteLog(sGlobal_sid,sGlobal_ecr,"starting fetch transaction_action_10.jsp");
+    await fetch(
+        '/jsp/common/transaction_action_10.jsp',
+        {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            t:sGlobal_token
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data === undefined) throw new Error("empty response");
+        if (isEmpty(data)) throw new Error("empty response JSON");
+        WriteLog(sGlobal_sid,sGlobal_ecr,"fetch transaction_action_10.jsp, response:"+JSON.stringify(data));
+        const redirectURL= data.redirect;
+        if (redirectURL === undefined) throw new Error("empty response.redirect");
+        WriteLog(sGlobal_sid,sGlobal_ecr,"redirect to "+redirectURL);
+        ApplePay_Redirect(redirectURL);         //JS/payment_display.js
+    })
+    .catch(error => {
+        bGlobal_hasError = true;
+        const sErrorMessage = ((sLang==="english")?"Payment was settled, but create order failed. Pleas contact our hotline with reference number provided. Reference Number:":"付款成功, 但製作訂單失敗, 請提供參考編號向我們的熱線查詢. 參考編號:")+sGlobal_ecr;
+        WriteLog(sGlobal_sid,sGlobal_ecr,"fetch /jsp/common/transaction_action_10.jsp Error: " + error+", display to user:"+sErrorMessage);
+        ApplePay_showMessage(sErrorMessage);
+    });
+};
+
+
+Payment.loadingModal = function(){
+    if(jQuery("#loading-modal").length > 0){
+        return;
+    }
+    var $loading = jQuery("<div id='loading-modal'><div class='loading-modal__table'><div class='loading-modal__cell'></div></div></div>");
+    $loading.addClass("modal  overlay");
+    $loading.attr("data-backdrop", "static");
+    $loading.attr("data-keyboard", "false");
+    $loading.modal('show');
+    //
+    var opts = {
+        color: '#fff'
+    };
+    var target = $loading.find(".loading-modal__cell")[0];
+    var spinner = new Spinner(opts).spin(target);
+    $loading.data("spinner", spinner);
+};
+Payment.unloadingModal = function(){
+    var $loading = jQuery("#loading-modal");
+    if($loading.length==0) {
+        return;
+    }
+    var spinner = $loading.data("spinner");
+    if(spinner){
+        spinner.stop();
+    }
+    $loading.modal('hide');
+    $loading.remove();
+};
+
+jQuery(document).ready(function() {
+    var $form = jQuery(".payment-form");
+    var $submitButton = jQuery(".payment-footer__submit-button");
+    var sid_value = jQuery("#sid").val();
+    //
+    var octopus_platform = jQuery("#octopus_platform").val();
+    var octopus_app = jQuery("#octopus_app").val();
+    //
+    var wechatpay_platform = jQuery("#wechatpay_platform").val();
+    var wechatpay_app = jQuery("#wechatpay_app").val();
+    //
+    var payme_platform = jQuery("#payme_platform").val();
+    var payme_app = jQuery("#payme_app").val();
+
+    var PAYMENT_TYPE_VISA = "VisaCard";
+    var PAYMENT_TYPE_MASTER = "MasterCard";
+    var PAYMENT_TYPE_AE = "AmExCard";
+    var PAYMENT_TYPE_CUP = "CUP";
+    var PAYMENT_TYPE_WECHATPAY = "WeChatPay";
+    var PAYMENT_TYPE_OCTOPUS = "Octopus";
+    var PAYMENT_TYPE_ALIPAY = "Alipay";
+    var PAYMENT_TYPE_PAYME = "PayMe";
+    var PAYMENT_TYPE_APPLEPAY = "ApplePay";
+
+    bSelect = true;
+    SelectNewCard();
+    /*if(bOnlyHasNewCard){
+        bSelect = true;
+        SelectNewCard();
+    } else {
+         jQuery("#FormPhone .payment-form-inner").css("display" , "none");
+    }*/
+
+    var isFormBusy = function($form) {
+        return $form.data("busy") === true;
+    };
+    var setFormBusy = function($form) {
+        $form.data("busy", true);
+    };
+    var unsetFormBusy = function($form) {
+        $form.data("busy", false);
+    };
+    var isCUPCard = function(){
+        return (jQuery("#CardType").val() == PAYMENT_TYPE_CUP);
+    }
+    var isCreditCard = function(){
+        var sCardType = jQuery("#CardType").val();
+        return (sCardType == PAYMENT_TYPE_VISA || sCardType == PAYMENT_TYPE_MASTER || sCardType == PAYMENT_TYPE_AE);
+    }
+    var isDefaultPayment = function(){
+        return (jQuery("#CardType").val() == "");
+    }
+    var validateCupSubmit = function() {
+        if (!CheckCreditCardName()) {
+            return false;
+        } else {
+            return true;
+        }
+    }
+    var validateCardSubmit = function() {
+        //check octopus
+
+        if (bUse) {
+            //check card type
+            /*if(!CheckCardType()){
+            	return false;
+            }*/
+            //check card issue
+            //if(sid_value != "care" && sid_value != "ecommerce") {
+            if( sid_value == "care_autopay" ||
+                sid_value == "frontdesk_autopay" ||
+                sid_value == "myaccount_autopay") {
+                if (!CheckCardIssue()) {
+                    return false;
+                }
+            }
+
+            if (!CheckCreditCardName()) {
+                return false;
+            }
+
+            //check credit card no
+            if (!CheckVisaMaster()) {
+                return false;
+            }
+
+            if (!CheckCVC()) {
+                return false;
+            }
+
+            if((sid_value=="care_autopay") || (sid_value=="frontdesk_autopay") || (sid_value=="myaccount_autopay") ) {
+                if (!CheckTNC()) {
+                    return false;
+                }
+            }
+
+        } else {
+            if (bExp) {
+                if (!CheckCardNumberExp()) {
+                    return false;
+                }
+            }
+            if (!CheckCVC()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    var isMobile = function() {
+        return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    }
+
+    var isCareApp = function(){
+        if(navigator.userAgent.toLowerCase().indexOf("appuat-stcare") > -1){
+            return true;
+        } else if ( (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) && (!window.MSStream) ){
+            //for iPad iOS 13
+            return true;
+        }
+        return false;
+    }
+
+    //Redirect url (Pop in safari)
+    var RedirectURL = function(sURL, encodeURL) {
+        //console.log("sURL: "+sURL+", encodeURL: "+encodeURL);
+        function checkFromApp() {
+            return true;
+        }
+        //
+        var myDate = new Date();
+        if (sURL.indexOf("market://") > -1 || sURL.indexOf("market.android.com") > -1 || sURL.indexOf("play.google.com") > -1) {
+            if (sURL.indexOf("%3F") > -1) {
+                sURL = sURL + "%26popsrc%3DCARE%26md%3D" + myDate.getTime();
+            } else {
+                sURL = sURL + "%3Fpopsrc%3DCARE%26md%3D" + myDate.getTime();
+            }
+        } else {
+            if (sURL.indexOf("popsrc=CARE") > -1) {
+                sURL = sURL + "&md=" + myDate.getTime();
+            } else {
+                if (sURL.indexOf('#') <= -1) {
+                    if (sURL.indexOf("?") > -1) {
+                        sURL = sURL + "&popsrc=CARE&md=" + myDate.getTime();
+                    } else {
+                        sURL = sURL + "?popsrc=CARE&md=" + myDate.getTime();
+                    }
+                }
+            }
+        }
+        if (sURL.indexOf("smc://") > -1) {
+            if (document.location.href.indexOf("://securepaymentstage.smartone.com") > -1) {
+                sURL = sURL.replace("smc://", "smcdev://");
+            }
+            /*if (document.location.href.indexOf("://careuat.smartone.com") > -1) {
+            	sURL = sURL.replace("smc://","smcuat://");
+            }*/
+
+            if (encodeURL != "" && typeof encodeURL != "undefined") {
+                sURL = sURL + "&l=" + encodeURIComponent(encodeURL);
+            }
+        }
+        if (checkFromApp() == true) {
+            setTimeout(function() {
+                document.location.href = sURL;
+            }, 100);
+        } else {
+            var a = document.createElement('a');
+            a.setAttribute("href", sURL);
+            a.setAttribute("target", "_blank");
+            /*var dispatch = document.createEvent("HTMLEvents");
+            dispatch.initEvent("click", true, true);
+            a.dispatchEvent(dispatch);	*/
+            jQuery(a).trigger("click");
+            //console.log(jQuery(a));
+            a = null;
+            //alert("RedirectURL complete: "+sURL);
+            //event.stopPropagation();
+        }
+
+        //event.preventDefault();
+    }
+    //
+    var onClickSubmit = function(e) {
+        var sCardType = jQuery("#CardType").val();
+        var isNeedInstallApps = false;
+        wechatpay_app = jQuery("#wechatpay_app").val();
+        payme_app = jQuery("#payme_app").val();
+
+        e.preventDefault();
+
+        if (isFormBusy($form)) {
+            setSubmitStatus(false);
+            return;
+        }
+
+        if (jQuery(".payment-footer__submit-button").data("submitting")){
+            return;
+        }
+
+        setFormBusy($form);
+        setSubmitStatus(true);
+
+        if(octopus_app == "N" && (octopus_platform == "ios" || octopus_platform == "android" || octopus_platform == "huawei")) {
+            if(sCardType == PAYMENT_TYPE_OCTOPUS) {
+                promptDownloadOctopus();
+                isNeedInstallApps = true;
+                setSubmitStatus(false);
+                unsetFormBusy($form);
+                return;
+            }
+        }
+
+        if(wechatpay_app == "N" && (wechatpay_platform == "ios" || wechatpay_platform == "android" || wechatpay_platform == "huawei")) {
+            if(sCardType == PAYMENT_TYPE_WECHATPAY) {
+                promptDownloadWeChatPay();
+                isNeedInstallApps = true;
+                setSubmitStatus(false);
+                unsetFormBusy($form);
+                return;
+            }
+        }
+
+        if(sCardType == PAYMENT_TYPE_WECHATPAY) {
+            if (navigator.userAgent.indexOf('MicroMessenger') !== -1) {
+                // We are in WeChat browser, for WeChatBrowser we treate it as web to show QR code
+                jQuery("#wechatpay_platform").val("WeChatBrowser");
+                //console.log('WeChat browser detected, wechatpay_platform:'+jQuery("#wechatpay_platform").val());
+            }
+            else{
+                //console.log('Not WeChat browser');
+                if(wechatpay_app == "" && isMobile()) {
+                    if(sCardType == PAYMENT_TYPE_WECHATPAY) {
+                        promptHasWeChatPay();
+                        isNeedInstallApps = true;
+                        setSubmitStatus(false);
+                        unsetFormBusy($form);
+                        return;
+                    }
+                }
+            }
+        }
+         /*
+        if(payme_app == "N" && (payme_platform == "ios" || payme_platform == "android" || payme_platform == "huawei")) {
+            if(sCardType == PAYMENT_TYPE_PAYME) {
+                promptDownloadPayme();
+                isNeedInstallApps = true;
+                setSubmitStatus(false);
+                unsetFormBusy($form);
+                return;
+            }
+        }
+        */
+
+        if(sCardType == PAYMENT_TYPE_PAYME && payme_app == "" && isMobile()) {
+            if(sCardType == PAYMENT_TYPE_PAYME) {
+                promptHasPayme();
+                isNeedInstallApps = true;
+                setSubmitStatus(false);
+                unsetFormBusy($form);
+                return;
+            }
+        }
+
+        if ( (sCardType == PAYMENT_TYPE_ALIPAY) ||
+            (sCardType == PAYMENT_TYPE_OCTOPUS && !isNeedInstallApps) ||
+            (sCardType == PAYMENT_TYPE_WECHATPAY && !isNeedInstallApps) ||
+            (sCardType == PAYMENT_TYPE_PAYME && !isNeedInstallApps) ) {
+            setSubmitStatus(true);
+            jQuery("#FormPhone").submit();
+            //console.log("alipay submit");
+            return;
+        }
+
+        if(isCUPCard()){
+            //check input name
+            if (!validateCupSubmit()) {
+                setSubmitStatus(false);
+                unsetFormBusy($form);
+                return;
+            }
+        }
+
+        if(isCreditCard() || isDefaultPayment()){
+            //check input name
+            if (!validateCardSubmit()) {
+                setSubmitStatus(false);
+                unsetFormBusy($form);
+                return;
+            }
+        }
+
+        if ( (sCardType == PAYMENT_TYPE_APPLEPAY) ) {
+            //setSubmitStatus(true);
+            //ApplePay_clickToContinue(e);
+            try{
+                const sCardType_input = jQuery("#CardType").val();
+                if (sCardType_input===undefined || sCardType_input!=="ApplePay"){
+                    console.log('ApplePay_clickToContinue:'+sCardType_input);
+                    return;
+                }
+                WriteLog(sGlobal_sid,sGlobal_ecr,"clickToContinue() triggered.");
+                ApplePay_updatePaymentDesc(sLang)
+                ApplePay_showSpinner();
+                ApplePay_closeFormContainer();
+                ApplePay_closeContinueButton();
+
+                if (!window.ApplePaySession) throw new Error("window.ApplePaySession:false");
+
+                const session = new ApplePaySession(3, joGlobal_ApplePay_paymentRequest);
+                WriteLog(sGlobal_sid,sGlobal_ecr,"ApplePay session init success, payment request:" + JSON.stringify(joGlobal_ApplePay_paymentRequest));
+
+                try{
+                    session.onvalidatemerchant = async function(event){
+                        WriteLog(sGlobal_sid,sGlobal_ecr,"starting session.onvalidatemerchant, validationURL" + JSON.stringify(event.validationURL));
+
+        //const actionUrl= "/jsp/testing/test_payment_form_action.jsp";
+                        const actionUrl= "/jsp/common/transaction_action_1.jsp";
+                        //const fetchActionUrl = actionUrl+"?t="+sGlobal_token+"&language="+sLang+"&sid="+sGlobal_sid+"&ApplePay_paymentRequest="+JSON.stringify(joGlobal_ApplePay_paymentRequest)+"&RAcardtype=ApplePay&CardType=ApplePay&isRestful=Y";
+                        const fetchActionUrl = actionUrl+"?t="+sGlobal_token+"&language="+sLang+"&sid="+sGlobal_sid+"&RAcardtype=ApplePay&CardType=ApplePay&isRestful=Y";
+                        WriteLog(sGlobal_sid,sGlobal_ecr,"session.onvalidatemerchant, fetch "+actionUrl);
+                        await fetch(
+                            fetchActionUrl,
+                            {
+                                method: 'POST',
+                                headers:{
+                                'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    ApplePay_paymentRequest:joGlobal_ApplePay_paymentRequest
+                                })
+                            }
+                        )
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data === undefined) throw new Error("empty response");
+                            if (isEmpty(data)) throw new Error("empty response JSON");
+                            if (data.status !=="ok") throw new Error("return status not ok");
+                        })
+                        .catch(err => {
+                            bGlobal_hasError = true;
+                            const sErrorMessage = ((sLang==="english")?"System Bussy":"系統繁忙")+"(001.1)";
+                            WriteLog(sGlobal_sid,sGlobal_ecr,"fetch "+actionUrl+" Error: " + err+", display to user:"+sErrorMessage);
+                            ApplePay_showMessage(sErrorMessage);
+                        });
+
+                        if (bGlobal_hasError) throw new Error("fetch "+actionUrl+" failed");
+
+                        const fetchMerchantAuthUrl = "/jsp/ApplePay/cybersource/API_authorizeMerchant.jsp";
+                        WriteLog(sGlobal_sid,sGlobal_ecr,"session.onvalidatemerchant, fetch "+fetchMerchantAuthUrl);
+                        await fetch(
+                            fetchMerchantAuthUrl,
+                            {
+                                method: 'POST',
+                                headers:{
+                                'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    t:sGlobal_token,
+                                    lang:sLang,
+                                    //payment_request:joGlobal_ApplePay_paymentRequest,
+                                    validationURL:event.validationURL
+                                })
+                            }
+                        )
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data === undefined) throw new Error("empty response");
+                            if (isEmpty(data)) throw new Error("empty response JSON");
+                            try{
+                                session.completeMerchantValidation(data);
+                                WriteLog(sGlobal_sid,sGlobal_ecr,"session.completeMerchantValidation");
+                            }
+                            catch(error){
+                                bGlobal_hasError = true;
+                                const sErrorMessage = ((sLang==="english")?"System Bussy":"系統繁忙")+"(001.2)";
+                                WriteLog(sGlobal_sid,sGlobal_ecr,"session.completeMerchantValidation Error: " + error+", display to user:"+sErrorMessage);
+                                ApplePay_showMessage(sErrorMessage);
+                                session.abort();
+                            }
+                        })
+                        .catch(err => {
+                            bGlobal_hasError = true;
+                            const sErrorMessage = ((sLang==="english")?"System Bussy":"系統繁忙")+"(001.3)";
+                            WriteLog(sGlobal_sid,sGlobal_ecr,"fetch API_authorizeMerchant.jsp Error: " + err+", display to user:"+sErrorMessage);
+                            ApplePay_showMessage(sErrorMessage);
+                            session.abort();
+                        });
+                    }
+                }
+                catch(error){
+                    bGlobal_hasError = true;
+                    const sErrorMessage = ((sLang==="english")?"System Bussy":"系統繁忙")+"(001)";
+                    WriteLog(sGlobal_sid,sGlobal_ecr,"session.onvalidatemerchant Error: " + error+", display to user:"+sErrorMessage);
+                    ApplePay_showMessage(sErrorMessage);
+                    session.abort();
+                }
+
+                try{
+                    //WriteLog(sGlobal_sid,sGlobal_ecr,"onpaymentauthorized");
+                    session.onpaymentauthorized = async function(event) {
+                        const payment = event.payment;
+                        WriteLog(sGlobal_sid,sGlobal_ecr,"starting session.onpaymentauthorized:"+ JSON.stringify(payment));
+
+                        //const payment = event.payment;
+                        //var paymentDataString = JSON.stringify(event.payment.token.paymentData);
+                        //var paymentDataBase64 = btoa(paymentDataString);
+
+                        await fetch(
+                            '/jsp/ApplePay/cybersource/API_payment_authorize.jsp',
+                            {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                t:sGlobal_token,
+                                payment:payment
+                            })
+                        })
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data === undefined) throw new Error("empty response");
+                            if (isEmpty(data)) throw new Error("empty response JSON");
+                            WriteLog(sGlobal_sid,sGlobal_ecr,"session.onpaymentauthorized response:"+data.status);
+                            if (data.status ==="ok") {
+                                session.completePayment(ApplePaySession.STATUS_SUCCESS);
+                                WriteLog(sGlobal_sid,sGlobal_ecr,"ApplePaySession."+ApplePaySession.STATUS_SUCCESS);
+
+                                //create order
+                                ApplePay_createOrder();
+
+                            } else {
+                                throw new Error("status not ok");
+                                //session.completePayment(ApplePaySession.STATUS_FAILURE);
+                            }
+                        })
+                        .catch(error => {
+                            bGlobal_hasError = true;
+                            const sErrorMessage = ((sLang==="english")?"Payment was rejected":"付款被拒")+"(002.1)";
+                            WriteLog(sGlobal_sid,sGlobal_ecr,"fetch API_payment_authorize.jsp Error: " + error+", display to user:"+sErrorMessage);
+                            ApplePay_showMessage(sErrorMessage);
+                            session.completePayment(ApplePaySession.STATUS_FAILURE);
+                            session.abort();
+                        });
+                    };
+
+                }
+                catch(error){
+                    bGlobal_hasError = true;
+                    const sErrorMessage = ((sLang==="english")?"System Bussy":"系統繁忙")+"(002)";
+                    WriteLog(sGlobal_sid,sGlobal_ecr,"session.onpaymentauthorized Error: " + error+", display to user:"+sErrorMessage);
+                    ApplePay_showMessage(sErrorMessage);
+                    session.abort();
+                }
+
+                session.begin();
+
+                try{
+                    session.oncancel = function(event) {
+                        if (!bGlobal_hasError){
+                            const sErrorMessage = ((sLang==="english")?"The payment was cancelled.":"付款已取消");
+                            WriteLog(sGlobal_sid,sGlobal_ecr,"session.oncancel, display to user:"+sErrorMessage);
+                            ApplePay_showMessage(sErrorMessage);
+                        }
+                    };
+                }
+                catch(error){
+                    bGlobal_hasError = true;
+                    const sErrorMessage = ((sLang==="english")?"System Bussy":"系統繁忙")+"(003)";
+                    WriteLog(sGlobal_sid,sGlobal_ecr,"session.oncancel: " + error+", display to user:"+sErrorMessage);
+                    ApplePay_showMessage(sErrorMessage);
+                    session.abort();
+                }
+
+            }
+            catch(Err)
+            {
+                bGlobal_hasError = true;
+                const sErrorMessage = ((sLang==="english")?"System Bussy":"系統繁忙")+"(000)";
+                WriteLog(sGlobal_sid,sGlobal_ecr,"js error:"+Err+", display to user:"+sErrorMessage+":"+Err);
+                ApplePay_showMessage(sErrorMessage);
+            }
+
+
+        }else{
+            //
+            //jQuery("#ExpYear").val(jQuery("#ExpYearInput").val().substring(2,4));
+
+            jQuery(".payment-form-inner").css('overflow-y', 'hidden');
+            Payment.loadingModal();
+            jQuery(".payment-footer__submit-button").attr("disabled", true);
+            var isFrontdesk = jQuery("body").hasClass("stfrontdesk ");
+            var iDelay = 0;
+            if (isFrontdesk){
+                iDelay = 1000;
+            }
+            //setSubmitStatus(true);
+            jQuery('#FormPhone').append('<input type="hidden" name="brwoserJavaEnabled" value="'+(navigator.javaEnabled()?"Y":"N")+'">');
+            jQuery('#FormPhone').append('<input type="hidden" name="browserLanguage" value="' +navigator.language +'">');
+            jQuery('#FormPhone').append('<input type="hidden" name="browserScreenHeight" value="' + window.screen.height + '">');
+            jQuery('#FormPhone').append('<input type="hidden" name="browserScreenWidth" value="' + window.screen.width + '">');
+            jQuery('#FormPhone').append('<input type="hidden" name="browserColorDepth" value="' + window.screen.colorDepth + '">');
+            jQuery('#FormPhone').append('<input type="hidden" name="browserTimeZoneOffset" value="' + new Date().getTimezoneOffset() + '">');
+            setTimeout(function(){
+                jQuery("#FormPhone").submit();
+                //console.log("submit form");
+            },iDelay);
+        }
+    };
+
+    var setSubmitStatus = function(status){
+        jQuery(".payment-footer__submit-button").data("submitting",status);
+    }
+
+    var initSubmit = function() {
+        $submitButton.on("click", onClickSubmit);
+        $submitButton.on("touchend", onClickSubmit);
+    };
+
+    var autoSelectCardType = function() {
+        var cardNumber1Value = jQuery("#CardNumber1").val();
+        var isMatch = false;
+        // skip last cardtype cardObject
+        var cardSize = Cards.size - 1;
+
+        jQuery(".payment-form__card-type-group img").removeClass("payment-form__card-type-active");
+        if (cardNumber1Value != "") {
+            for (var n = 0; n < cardSize; n++) {
+                var cardRules = Cards[n].rules;
+                for (var j = 0; j < cardRules.size; j++) {
+                    if (cardNumber1Value.indexOf(cardRules[j])==0) {
+                        //console.log(Cards[n].cardtype+":"+cardRules[j]);
+                        jQuery("input[name=RAcardtype][value=" + Cards[n].cardtype + "]").click();
+                        isMatch = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!isMatch) {
+            jQuery(".payment-form__card-type-group img").removeClass("payment-form__card-type-active");
+            jQuery("#CardType").val("");
+        }
+        //console.log("isMatch" + isMatch);
+        //console.log("cardType value:" + jQuery("#CardType").val());
+        ChangeCardFieldProperty();
+    }
+
+
+    var initModal = function() {
+        jQuery(".payment-form__terms-link").on("click", function() {
+            jQuery('#payment-form__modal').modal('show');
+        });
+    }
+
+    var hideShowNewBottom = function(id) {
+        //console.log("hideShowNewBottom" + hideShowNewBottom);
+        //check att ctype
+        var sCardType = jQuery('#' + id).attr("ctype");
+        if(sCardType!=""){
+            //select saved card
+            //hide upper "new" and show "lower new"
+            jQuery("#new_card_upper").hide();
+            jQuery("#new_card_lower").show();
+        }else{
+            //select new card
+            //show upper "new" and hide "lower new"
+            jQuery("#new_card_upper").show();
+            jQuery("#new_card_lower").hide();
+        }
+    }
+
+    var updateCardNameDesc = function(sCardType) {
+        if(sCardType == "CUP" && !isMobile()) {
+            jQuery(".payment-form__content-slot[data-type='card-name']").attr("data-card-type" , sCardType);
+        } else {
+            jQuery(".payment-form__content-slot[data-type='card-name']").attr("data-card-type" , "others");
+        }
+    }
+    //
+    var initEvent = function() {
+        var $cardNumber = jQuery("#CardNumberMask");
+        var $cardNumberAll = jQuery("#CardNumber1, #CardNumber2, #CardNumber3, #CardNumber4");
+        var $cardNumber1 =  jQuery("#CardNumber1");
+        var $cardNumber2 =  jQuery("#CardNumber2");
+        var $cardNumber3 =  jQuery("#CardNumber3");
+        var $cardNumber4 =  jQuery("#CardNumber4");
+        var previousChecked = "";
+
+        var sCardValue1 = $cardNumber1.val();
+
+        var copyCardValue = function(){
+            if (sCardValue1 != $cardNumber1.val() ){
+                clearInterval(refreshIntervalCardInput);
+                sCardValue1 = $cardNumber1.val();
+            }
+            //$cardNumber.val($cardNumber1.val()+$cardNumber2.val()+$cardNumber3.val()+$cardNumber4.val());
+            autoSelectCardType();
+        }
+
+        var refreshIntervalCardInput = "";
+
+        var refreshIntervalCard = function(){
+            refreshIntervalCardInput = setInterval(copyCardValue, 1000);
+        }
+        //$cardNumber.mask("9999 9999 9999 9999");
+        //$cardNumber.attr("placeholder", "0000 0000 0000 0000");
+
+        jQuery(".payment-form__input-field__card-number-input").on("input" , function(){
+            //console.log("this id" + jQuery(this).attr("id"));
+            var $this = jQuery(this);
+
+            if ($this.val().length > 0){
+                if($this != $this.last()) {
+                    if($this.val().length == $this.attr("maxlength"))
+                    $this.next($this).focus();
+                }
+            }
+            autoSelectCardType();
+        });
+
+
+/*        $cardNumber.on("input",function(){
+            var $this = jQuery(this);
+            var sValue = $this.val().trim().replace(/\s/g, '').match(/.{1,4}/g);
+
+            sCardValue1 = $cardNumber1.val();
+            clearInterval(refreshIntervalCardInput);
+            if ($this.val().length > 0){
+                $cardNumber1.val(sValue[0]);
+                $cardNumber2.val(sValue[1]?sValue[1]:"");
+                $cardNumber3.val(sValue[2]?sValue[2]:"");
+                $cardNumber4.val(sValue[3]?sValue[3]:"");
+            } else {
+                $cardNumberAll.val("");
+            }
+            autoSelectCardType();
+        })*/
+
+        jQuery(document).on('click', '#use_new_card', function (event) {
+
+            jQuery('html, body').animate({
+                scrollTop: jQuery("body").offset().top
+            }, 500);
+
+            jQuery("#use_new_card").attr("data-display" , "hide");
+            jQuery('.cc_select input[type="radio"]').prop("checked" , false);
+            jQuery('input:radio[name="RAcardtype"]').prop("checked" , false);
+            SelectNewCard();
+        });
+
+        jQuery(".payment-form__card-scanner-cell").on("click", function() {
+            if (!jQuery("body").hasClass("care") && !jQuery("body").hasClass("bill_payment")) {
+                return;
+            }
+            RedirectURL('smc://card_scanner');
+
+            clearInterval(refreshIntervalCardInput);
+            refreshIntervalCard();
+            setTimeout(function(){
+                clearInterval(refreshIntervalCardInput);
+            },60000);
+        });
+
+        jQuery(".payment-form").find("input, select").on("click", function() {
+            ClearError(jQuery(this));
+        });
+
+        jQuery('input:radio[name="RAcardtype"]').click(function(){
+            //console.log("show hide card field");
+            var checkedValue = jQuery('input:radio[name="RAcardtype"]:checked').val();
+            jQuery("#CardType").val(checkedValue);
+            updateCardNameDesc(checkedValue);
+            ChangeCardFieldProperty();
+            ShowHideCardField();
+        });
+
+        if (jQuery("body").hasClass("fixed-footer")){
+        	jQuery(".payment-form-inner").css({"padding-bottom":jQuery(".payment-footer").innerHeight()});
+
+        }
+        jQuery(".payment-form").css({"padding-bottom":jQuery(".payment-footer").innerHeight()*1.2});
+        CheckSelectSaveCreditCard();
+
+    }
+
+    jQuery(".saved-card-content__slider").slick({
+        dots: false,
+        infinite: false,
+        speed: 300,
+        slidesToShow: 1,
+        /*centerMode: true, */
+        swipe: true,
+        centerPadding: "3%",
+        variableWidth: true,
+        responsive: [
+            {
+                breakpoint: 769,
+                settings: {
+                    centerPadding : "2%",
+                    variableWidth: true,
+                    infinite: false
+                },
+            },
+        ]
+    });
+
+    function ApplePay_isAppleDevice() {
+        return /iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent) && !window.MSStream;
+    }
+    var modifyCardTypeOrdering = function() {
+//console.log("modifyCardTypeOrdering:0");
+        //put ApplePay to first, if the device is available for ApplePay
+        const container = document.getElementById("id_card-type-container");
+        const firstDiv = document.querySelector('[cardtype_ordering="1"]');
+        const ApplePayDiv = document.getElementById("card-type-div_ApplePay");
+        if (ApplePayDiv===undefined)  return;
+
+        //Check if the device can make payments & if the device is Apple device
+        if (ApplePay_isAppleDevice()){
+            if (firstDiv instanceof Node && ApplePayDiv instanceof Node) {
+                container.insertBefore(ApplePayDiv, firstDiv);
+            } else {
+                //console.error('firstDiv is not a Node');
+            }
+        }
+    }
+    var initSelectFirstCardType = function(){
+        var $radioButtons = $('input:radio[name="RAcardtype"]');
+        if (!$radioButtons.is(':checked')) {
+            $radioButtons.first().trigger('click');
+        }
+    }
+    //
+    Payment.initErrorMessage();
+    //modifyCardTypeOrdering(); //OPG-21 cancelled to put ApplePay as first payment method
+    initEvent();
+    initModal();
+    initSubmit();
+    initSelectFirstCardType();
+});

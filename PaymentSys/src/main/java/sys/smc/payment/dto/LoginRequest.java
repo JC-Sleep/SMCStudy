@@ -23,4 +23,3 @@ public class LoginRequest {
     @Size(min = 6, max = 100, message = "密码长度不合法")
     private String password;
 }
-

@@ -54,16 +54,15 @@ public class StandardCharteredGatewayClient extends AbstractPaymentGateway {
 
     @Override
     public boolean supportsPaymentMethod(String paymentMethod) {
-        // 渣打银行支持的支付方式
-        return "CARD".equals(paymentMethod) 
-            || "VISA".equals(paymentMethod)
-            || "MASTERCARD".equals(paymentMethod)
-            || "UNIONPAY".equals(paymentMethod);
+        // SCB 不参与自动路由（selectGateway）。
+        // 普通信用卡/借记卡统一走 CyberSource。
+        // SCB 仅在前端显式传 channel=SCB 时，通过 getGateway(SCB) 强制选中。
+        return false;
     }
 
     @Override
     public int getPriority() {
-        return 10; // 银行渠道优先级高
+        return 1; // 保留最高优先级，仅用于强制指定时
     }
 
     // ==================== 抽象方法实现 ====================

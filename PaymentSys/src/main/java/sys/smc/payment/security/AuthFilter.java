@@ -105,4 +105,3 @@ public class AuthFilter extends OncePerRequestFilter {
         return request.getRemoteAddr();
     }
 }
-

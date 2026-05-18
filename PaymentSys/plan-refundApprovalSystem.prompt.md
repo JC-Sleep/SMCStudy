@@ -230,4 +230,3 @@ public void init() {
 2. **退款执行同步 vs 异步** — 银行退款 API 可能超时（渣打最多 10s），建议审批通过后**异步执行**（状态先变 EXECUTING，结果回填），财务页面轮询或推送结果。**你们是否接受异步方式，还是必须同步返回结果？**
 
 3. **多次部分退款** — 同一笔交易是否支持多次提交部分退款申请（总额 ≤ 原金额）？如需支持，`RefundApplicationService.applyRefund()` 需加 `SUM(refund_amount) WHERE transaction_id=? AND status NOT IN ('REJECTED','FAILED')` 校验。**请确认是否需要。**
-

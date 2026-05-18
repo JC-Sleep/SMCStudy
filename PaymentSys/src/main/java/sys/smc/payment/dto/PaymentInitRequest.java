@@ -84,4 +84,30 @@ public class PaymentInitRequest implements Serializable {
      * - 如果不传，后端会使用订单号+支付方式作为幂等键
      */
     private String idempotencyToken;
+
+    /**
+     * 渠道强制覆盖（可选）
+     *
+     * 用途：渣打专属支付页面传 "SCB"，强制走渣打网关，跳过自动路由。
+     * 普通信用卡页面不传此字段，由 PaymentGatewayRouter 根据 paymentMethod 自动选 CyberSource。
+     *
+     * 示例：
+     * - 渣打专属页面：{ "channel": "SCB", ... }
+     * - 普通信用卡：  { "paymentMethod": "VISA", ... }（不传 channel）
+     */
+    private String channel;
+
+    /**
+     * CyberSource Flex Microform v2 transient token
+     *
+     * PCI DSS 合规关键字段：前端通过 Flex Microform 录入卡号后，CyberSource 返回此 token。
+     * 商户后端将此 token 传给 CyberSource API，真实卡号永远不经过商户服务器。
+     *
+     * 获取方式：
+     * 1. 前端调 GET /api/payment/cybersource/flex-key 获取 captureContext
+     * 2. 用 Flex Microform JS SDK 渲染卡号输入框
+     * 3. 用户输入卡号后，SDK 回调返回此 transientToken
+     * 4. 前端将此 token 放入支付请求的 transientToken 字段
+     */
+    private String transientToken;
 }

@@ -106,6 +106,19 @@ ccb:
   pub:
     key: ${CCB_PUB_KEY:}
 
+# CyberSource 国际信用卡网关（Visa / Mastercard / Amex）
+# 三个必填：merchant-id, key-id, shared-secret-key
+# 在 EBC 后台（ebc2.cybersource.com）→ Key Management 生成 Shared Secret Key
+cybersource:
+  merchant-id: ${CYBERSOURCE_MERCHANT_ID:}        # 商户ID（EBC Account Management）
+  key-id: ${CYBERSOURCE_KEY_ID:}                  # Shared Secret Key ID
+  shared-secret-key: ${CYBERSOURCE_SECRET_KEY:}   # Shared Secret（Base64编码）
+  api:
+    endpoint: ${CYBERSOURCE_API_ENDPOINT:https://apitest.cybersource.com}  # 沙箱/生产切换
+  webhook:
+    secret: ${CYBERSOURCE_WEBHOOK_SECRET:}        # Webhook 签名秘钥（EBC Webhook 配置）
+  currency: HKD
+
 # ==================== 对账与回调配置 ====================
 
 payment:
@@ -206,4 +219,3 @@ jwt:
   secret: ${JWT_SECRET:smartone-payment-jwt-secret-key-must-change-in-prod-2026!}
   # Token 有效期（小时），生产建议 8~24 小时
   expire-hours: ${JWT_EXPIRE_HOURS:24}
-

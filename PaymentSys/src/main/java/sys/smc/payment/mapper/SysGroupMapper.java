@@ -19,4 +19,3 @@ public interface SysGroupMapper extends BaseMapper<SysGroup> {
     @Select("SELECT PARENT_GROUP_ID FROM SYS_GROUP WHERE GROUP_ID = #{groupId} AND ENABLED = 1")
     Integer selectParentGroupId(@Param("groupId") Integer groupId);
 }
-

@@ -67,4 +67,3 @@ public class RefundAuditLog {
     @TableField("CREATE_TIME")
     private Date createTime;
 }
-

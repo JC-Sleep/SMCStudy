@@ -30,4 +30,3 @@ public interface SysUserMapper extends BaseMapper<SysUser> {
             "WHERE USER_ID = #{userId}")
     void incrementFailedAttempts(@Param("userId") String userId);
 }
-

@@ -228,4 +228,3 @@ WHERE USER_ID = ?
 | 登录审计 | `SYS_LOGIN_LOG` 表 | `auth_schema.sql` |
 | 财务路径拦截 | `FinanceAuthInterceptor` | `WebMvcConfig.java` |
 | Service 方法级防护 | `@RequireFinance` AOP | `FinanceAuthAspect.java` |
-

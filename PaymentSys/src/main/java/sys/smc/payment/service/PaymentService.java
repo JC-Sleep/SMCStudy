@@ -41,12 +41,15 @@ public class PaymentService {
     private Integer timeoutThreshold;
 
     /**
-     * 发起支付（自动选择渠道）
+     * 发起支付（自动选择渠道，支持 channel 覆盖）
+     *
+     * 若 request.getChannel() 非空 → 强制指定渠道（如 SCB 专属页面）
+     * 否则 → 根据 request.getPaymentMethod() 自动路由（如 VISA → CyberSource）
      */
     @Transactional(rollbackFor = Exception.class)
     public PaymentInitResponse initiatePayment(PaymentInitRequest request) {
-        // 根据支付方式自动选择网关
-        PaymentGateway gateway = gatewayRouter.selectGateway(request.getPaymentMethod());
+        PaymentGateway gateway = gatewayRouter.selectGateway(
+                request.getPaymentMethod(), request.getChannel());
         return doInitiatePayment(request, gateway);
     }
 

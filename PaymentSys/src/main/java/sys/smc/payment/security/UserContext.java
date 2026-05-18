@@ -53,4 +53,3 @@ public class UserContext {
         return parentGroupId != null && parentGroupId == 345;
     }
 }
-

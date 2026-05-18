@@ -113,6 +113,13 @@
             <version>3.17.7</version>
         </dependency>
 
+        <!-- CyberSource REST Client（国际信用卡网关：Visa/Mastercard/Amex） -->
+        <dependency>
+            <groupId>com.cybersource</groupId>
+            <artifactId>cybersource-rest-client-java</artifactId>
+            <version>0.0.55</version>
+        </dependency>
+
         <!-- Spring Boot Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

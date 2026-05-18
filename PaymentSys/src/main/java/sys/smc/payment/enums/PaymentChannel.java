@@ -29,7 +29,14 @@ public enum PaymentChannel {
     /**
      * 银联
      */
-    UNION_PAY("UNION", "银联", "unionpay");
+    UNION_PAY("UNION", "银联", "unionpay"),
+
+    /**
+     * CyberSource（国际信用卡：Visa / Mastercard / Amex）
+     * 认证方式：HTTP Signature（HMAC-SHA256）
+     * PCI DSS 合规：通过 Flex Microform v2，卡号不经过商户后端
+     */
+    CYBERSOURCE("CYBERSOURCE", "CyberSource", "cybersource");
 
     /**
      * 渠道代码

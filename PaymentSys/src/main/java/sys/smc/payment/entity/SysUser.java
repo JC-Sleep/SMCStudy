@@ -69,4 +69,3 @@ public class SysUser {
     @TableField("UPDATE_TIME")
     private Date updateTime;
 }
-

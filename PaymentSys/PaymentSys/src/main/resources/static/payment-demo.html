@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>支付系统 - 幂等Token示例</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #1890ff;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+        }
+        button:hover {
+            background-color: #40a9ff;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .info {
+            background-color: #e6f7ff;
+            border: 1px solid #91d5ff;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        .token-display {
+            background-color: #f0f0f0;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+            font-family: monospace;
+            word-break: break-all;
+        }
+        .log {
+            background-color: #000;
+            color: #0f0;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔒 支付系统 - 幂等Token演示</h1>
+
+        <div class="info">
+            <strong>💡 说明：</strong>
+            <p>幂等Token由<strong>前端生成</strong>（页面打开时生成一次）</p>
+            <p>无论点击多少次"支付"按钮，都使用同一个Token</p>
+            <p>后端能够识别重复请求，防止重复扣款</p>
+        </div>
+
+        <div class="token-display">
+            <strong>当前幂等Token：</strong>
+            <div id="tokenValue" style="color: #1890ff; margin-top: 5px;"></div>
+        </div>
+
+        <form id="paymentForm">
+            <div class="form-group">
+                <label for="orderRef">订单编号</label>
+                <input type="text" id="orderRef" value="CSP001234567" readonly>
+            </div>
+
+            <div class="form-group">
+                <label for="amount">支付金额（元）</label>
+                <input type="number" id="amount" value="176.00" step="0.01" min="0.01">
+            </div>
+
+            <div class="form-group">
+                <label for="paymentMethod">支付方式</label>
+                <select id="paymentMethod" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+                    <option value="ALIPAY">支付宝</option>
+                    <option value="CARD">银行卡</option>
+                    <option value="CCB">建设银行</option>
+                </select>
+            </div>
+
+            <button type="button" id="payBtn">立即支付</button>
+        </form>
+
+        <div class="log" id="logContainer">
+            <div>控制台日志：</div>
+        </div>
+    </div>
+
+    <script>
+        // ==================== 幂等Token工具类 ====================
+
+        /**
+         * 生成UUID v4
+         */
+        function generateUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = Math.random() * 16 | 0;
+                const v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        /**
+         * 日志输出
+         */
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('logContainer');
+            const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+            const color = type === 'error' ? '#ff4d4f' : type === 'success' ? '#52c41a' : '#0f0';
+            logContainer.innerHTML += `<div style="color: ${color}">[${timestamp}] ${message}</div>`;
+            logContainer.scrollTop = logContainer.scrollHeight;
+            console.log(message);
+        }
+
+        // ==================== 支付服务类 ====================
+
+        class PaymentService {
+            constructor() {
+                this.tokenCache = new Map();
+                this.requestCount = 0;
+            }
+
+            /**
+             * 获取幂等Token（订单级别）
+             * ⭐ 关键：同一订单返回同一Token
+             */
+            getIdempotencyToken(orderId) {
+                // 先查内存缓存
+                if (this.tokenCache.has(orderId)) {
+                    const token = this.tokenCache.get(orderId);
+                    log(`使用已有Token（内存缓存）: ${token.substring(0, 8)}...`);
+                    return token;
+                }
+
+                // 再查sessionStorage（防刷新页面）
+                const storageKey = `payment_token_${orderId}`;
+                let token = sessionStorage.getItem(storageKey);
+
+                if (token) {
+                    log(`使用已有Token（sessionStorage）: ${token.substring(0, 8)}...`);
+                } else {
+                    // 都没有，生成新Token
+                    token = generateUUID();
+                    sessionStorage.setItem(storageKey, token);
+                    log(`为订单${orderId}生成新Token: ${token}`, 'success');
+                }
+
+                this.tokenCache.set(orderId, token);
+                return token;
+            }
+
+            /**
+             * 发起支付
+             */
+            async initiatePayment(orderId, amount, paymentMethod) {
+                this.requestCount++;
+                const requestNum = this.requestCount;
+
+                log(`════════ 第${requestNum}次支付请求 ════════`);
+
+                // ⭐ 获取幂等Token（关键！）
+                const idempotencyToken = this.getIdempotencyToken(orderId);
+
+                const requestData = {
+                    orderReference: orderId,
+                    amount: parseFloat(amount),
+                    paymentMethod: paymentMethod,
+                    idempotencyToken: idempotencyToken,  // ⭐ 前端生成的Token
+                    returnUrl: window.location.origin + '/payment/return',
+                    userId: '33xxxx',
+                    currency: 'HKD'
+                };
+
+                log(`发送支付请求，Token: ${idempotencyToken.substring(0, 13)}...`);
+
+                try {
+                    // ⚠️ 模拟请求（实际应该调用真实API）
+                    log(`模拟调用后端API: POST /api/payment/initiate`);
+                    log(`请求数据: ${JSON.stringify(requestData, null, 2)}`);
+
+                    // 模拟响应
+                    await this.simulateAPICall();
+
+                    log(`后端响应：交易创建成功（或返回已存在交易）`, 'success');
+                    log(`✅ 第${requestNum}次请求处理完成`);
+                    log(''); // 空行
+
+                    return {
+                        code: 0,
+                        message: '成功',
+                        data: {
+                            transactionId: 'TXN20260402001',
+                            paymentUrl: 'https://payment.example.com/pay?id=xxx',
+                            status: 'PENDING'
+                        }
+                    };
+
+                } catch (error) {
+                    log(`❌ 支付失败: ${error.message}`, 'error');
+                    throw error;
+                }
+            }
+
+            /**
+             * 模拟API调用
+             */
+            simulateAPICall() {
+                return new Promise((resolve) => {
+                    setTimeout(resolve, 500); // 模拟500ms延迟
+                });
+            }
+
+            /**
+             * 清除Token（支付成功后可调用）
+             */
+            clearToken(orderId) {
+                this.tokenCache.delete(orderId);
+                sessionStorage.removeItem(`payment_token_${orderId}`);
+                log(`已清除订单${orderId}的Token`);
+            }
+        }
+
+        // ==================== 页面初始化 ====================
+
+        const paymentService = new PaymentService();
+        let isProcessing = false;
+
+        // 页面加载时显示Token
+        window.addEventListener('DOMContentLoaded', () => {
+            const orderId = document.getElementById('orderRef').value;
+            const token = paymentService.getIdempotencyToken(orderId);
+            document.getElementById('tokenValue').textContent = token;
+
+            log('═══════════════════════════════════════', 'info');
+            log('页面初始化完成，幂等Token已生成', 'success');
+            log('请多次点击"立即支付"按钮，观察Token不变', 'success');
+            log('═══════════════════════════════════════', 'info');
+            log('');
+        });
+
+        // 支付按钮点击事件
+        document.getElementById('payBtn').addEventListener('click', async () => {
+            if (isProcessing) {
+                log('⚠️ 上一个请求还在处理中，请稍候...', 'error');
+                return;
+            }
+
+            const orderId = document.getElementById('orderRef').value;
+            const amount = document.getElementById('amount').value;
+            const paymentMethod = document.getElementById('paymentMethod').value;
+
+            const payBtn = document.getElementById('payBtn');
+            payBtn.disabled = true;
+            payBtn.textContent = '支付中...';
+            isProcessing = true;
+
+            try {
+                const result = await paymentService.initiatePayment(orderId, amount, paymentMethod);
+
+                // 实际项目中，这里应该跳转到支付页面
+                // window.location.href = result.data.paymentUrl;
+
+                log(`支付URL: ${result.data.paymentUrl}`, 'success');
+
+            } catch (error) {
+                log(`支付失败: ${error.message}`, 'error');
+            } finally {
+                payBtn.disabled = false;
+                payBtn.textContent = '立即支付';
+                isProcessing = false;
+            }
+        });
+    </script>
+</body>
+</html>
+

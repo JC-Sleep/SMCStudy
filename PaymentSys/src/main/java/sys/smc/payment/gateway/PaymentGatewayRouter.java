@@ -122,6 +122,23 @@ public class PaymentGatewayRouter {
     }
 
     /**
+     * 根据支付方式智能选择网关（支持渠道强制覆盖）
+     *
+     * 用途：前端传 channel=SCB 时强制走渣打，不传 channel 则按 paymentMethod 自动路由。
+     *
+     * @param paymentMethod  支付方式（如 VISA / ALIPAY），channelOverride 为 null 时生效
+     * @param channelOverride 渠道代码覆盖（如 "SCB"），非 null 时直接 getGateway(channelOverride)
+     * @return 对应的网关实例
+     */
+    public PaymentGateway selectGateway(String paymentMethod, String channelOverride) {
+        if (channelOverride != null && !channelOverride.isEmpty()) {
+            log.debug("渠道强制覆盖: {}，跳过自动路由", channelOverride);
+            return getGateway(channelOverride);
+        }
+        return selectGateway(paymentMethod);
+    }
+
+    /**
      * 根据回调路径获取网关
      * @param callbackPath 回调路径标识
      * @return 网关实例

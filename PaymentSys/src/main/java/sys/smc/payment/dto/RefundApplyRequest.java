@@ -26,4 +26,3 @@ public class RefundApplyRequest {
     @NotBlank(message = "退款原因不能为空")
     private String refundReason;
 }
-

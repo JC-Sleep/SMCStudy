@@ -40,4 +40,3 @@ public interface RefundApplicationMapper extends BaseMapper<RefundApplication> {
     IPage<RefundApplication> selectPageByStatus(Page<RefundApplication> page,
                                                 @Param("status") String status);
 }
-

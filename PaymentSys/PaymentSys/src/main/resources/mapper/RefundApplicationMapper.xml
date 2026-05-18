@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="sys.smc.payment.mapper.RefundApplicationMapper">
+
+    <!-- 计算同一笔交易的有效申请数（排除终态 REJECTED/FAILED） -->
+    <select id="countActiveByTransactionId" resultType="int">
+        SELECT COUNT(*)
+        FROM REFUND_APPLICATION
+        WHERE TRANSACTION_ID = #{transactionId}
+          AND STATUS NOT IN ('REJECTED', 'FAILED')
+    </select>
+
+    <!-- 统计同一笔交易有效申请退款金额之和 -->
+    <select id="sumActiveAmountByTransactionId" resultType="java.math.BigDecimal">
+        SELECT NVL(SUM(REFUND_AMOUNT), 0)
+        FROM REFUND_APPLICATION
+        WHERE TRANSACTION_ID = #{transactionId}
+          AND STATUS NOT IN ('REJECTED', 'FAILED')
+    </select>
+
+    <!-- 检查是否存在进行中的申请（防止同时提交重复申请） -->
+    <select id="countInProgressByTransactionId" resultType="int">
+        SELECT COUNT(*)
+        FROM REFUND_APPLICATION
+        WHERE TRANSACTION_ID = #{transactionId}
+          AND STATUS IN ('PENDING_REVIEW', 'APPROVED', 'EXECUTING')
+    </select>
+
+    <!-- 按状态分页查询（MyBatis-Plus 自动处理 Oracle 分页） -->
+    <select id="selectPageByStatus" resultType="sys.smc.payment.entity.RefundApplication">
+        SELECT
+            ID, TRANSACTION_ID, ORDER_REFERENCE, GATEWAY_CODE,
+            REFUND_AMOUNT, ORIGINAL_AMOUNT, APPLICANT_USER_ID,
+            REFUND_REASON, STATUS,
+            REVIEWED_BY, REVIEWED_AT, REVIEW_REMARK,
+            REFUND_NO, COMPLETED_AT, FAIL_REASON,
+            CREATE_USER, UPDATE_USER,
+            CREATE_TIME, UPDATE_TIME, VERSION
+        FROM REFUND_APPLICATION
+        <where>
+            <if test="status != null and status != ''">
+                STATUS = #{status}
+            </if>
+        </where>
+        ORDER BY CREATE_TIME DESC
+    </select>
+
+</mapper>
+

@@ -95,4 +95,3 @@ public class RefundApplication extends BaseEntity {
     @TableField("UPDATE_USER")
     private String updateUser;
 }
-

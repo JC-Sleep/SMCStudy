@@ -18,4 +18,3 @@ public interface RefundAuditLogMapper extends BaseMapper<RefundAuditLog> {
      */
     List<RefundAuditLog> selectByApplicationId(@Param("applicationId") Long applicationId);
 }
-

@@ -98,8 +98,10 @@ public class PaymentServiceEnhanced {
      * ╚══════════════════════════════════════════════════════════════════╝
      */
     // ✅ Bug2已修复：移除 @Transactional，事务由内部 TransactionTemplate 管理
+    // ✅ 支持 channel 覆盖：request.getChannel() 非空时强制指定渠道（如 SCB 专属页面）
     public PaymentInitResponse initiatePayment(PaymentInitRequest request) {
-        PaymentGateway gateway = gatewayRouter.selectGateway(request.getPaymentMethod());
+        PaymentGateway gateway = gatewayRouter.selectGateway(
+                request.getPaymentMethod(), request.getChannel());
         return doInitiatePaymentWithDistributedLock(request, gateway);
     }
 

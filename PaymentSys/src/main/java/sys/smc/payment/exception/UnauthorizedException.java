@@ -28,4 +28,3 @@ public class UnauthorizedException extends RuntimeException {
         return httpStatus;
     }
 }
-

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="sys.smc.payment.mapper.PaymentTransactionMapper">
+
+    <!-- 根据幂等键查询 -->
+    <select id="selectByIdempotencyKey" resultType="sys.smc.payment.entity.PaymentTransaction">
+        SELECT * FROM PAYMENT_TRANSACTION
+        WHERE IDEMPOTENCY_KEY = #{idempotencyKey}
+    </select>
+
+    <!-- 根据银行交易ID查询 -->
+    <select id="selectByGatewayTransactionId" resultType="sys.smc.payment.entity.PaymentTransaction">
+        SELECT * FROM PAYMENT_TRANSACTION
+        WHERE GATEWAY_TRANSACTION_ID = #{gatewayTransactionId}
+    </select>
+
+    <!-- 根据订单编号查询 -->
+    <select id="selectByOrderReference" resultType="sys.smc.payment.entity.PaymentTransaction">
+        SELECT * FROM PAYMENT_TRANSACTION
+        WHERE ORDER_REFERENCE = #{orderReference}
+        ORDER BY CREATE_TIME DESC
+    </select>
+
+</mapper>
+
