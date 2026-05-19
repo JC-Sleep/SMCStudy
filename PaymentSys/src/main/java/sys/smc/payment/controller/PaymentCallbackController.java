@@ -117,7 +117,23 @@ public class PaymentCallbackController {
     }
 
     /**
-     * 构建成功响应（不同渠道要求不同）
+     * CyberSource 回调（Visa / Mastercard / Amex）
+     *
+     * CyberSource Webhook 要求：
+     *   - HTTP 200 响应（任意内容），否则 CyberSource 会重试最多 15 次
+     *   - Header: v-c-signature（HMAC-SHA256 of raw body）
+     *   - Body: JSON Event，格式 { "eventType": "payments.updated", "payload": [...] }
+     */
+    @PostMapping("/cybersource")
+    public ResponseEntity<String> handleCyberSourceCallback(
+            @RequestBody String rawBody,
+            @RequestHeader Map<String, String> headers,
+            HttpServletRequest request) {
+        return handleCallback("cybersource", rawBody, headers, request);
+    }
+
+    /**
+     * 构建成功响应（不同渠道要求不同格式）
      */
     private ResponseEntity<String> buildSuccessResponse(PaymentChannel channel) {
         switch (channel) {
@@ -127,6 +143,9 @@ public class PaymentCallbackController {
             case CCB:
                 // 建行要求返回 "OK"
                 return ResponseEntity.ok("OK");
+            case CYBERSOURCE:
+                // CyberSource 要求 HTTP 200，内容随意
+                return ResponseEntity.ok("SUCCESS");
             default:
                 return ResponseEntity.ok("SUCCESS");
         }

@@ -325,3 +325,401 @@ CyberSource 3DS 流程比 Stripe 更复杂，分两步 API：
 | ⑦ | Webhook 事件名格式不同 | `payment_intent.succeeded` | `payments.updated`（CyberSource 格式） |
 | ⑧ | 退款 API 参数结构不同 | 未说明差异 | 原始 `paymentId` 放在 body，非 URL 参数 |
 | ⑨ | 回调 signature 取值硬编码 | `headers.get("X-Signature")` | 优先取 `v-c-signature`，降级取 `X-Signature`（兼容 SCB） |
+
+---
+
+## 实现后发现的 Bug（v2 修复，2026-05-19）
+
+CyberSource 集成上线后，在代码审查中发现 3 个已实现代码的缺陷，全部已修复。
+
+### Bug A 🔴 — `PaymentCallbackServiceEnhanced` 签名 Header 取错（高危）
+
+**文件**：`PaymentCallbackServiceEnhanced.java` 第 83 行
+
+**问题代码**：
+```java
+// ❌ 错误：X-Signature 是 SCB 的 Header，CyberSource 根本不发这个
+String signature = headers.get("X-Signature");
+```
+
+**修复代码**：
+```java
+// ✅ 优先取 CyberSource 的 v-c-signature，降级到 SCB 的 X-Signature（向后兼容）
+String signature = headers.getOrDefault("v-c-signature", headers.get("X-Signature"));
+```
+
+**说明**：`PaymentCallbackController` 注入的是 `PaymentCallbackServiceEnhanced`（增强版，含 Redis 去重），  
+而我们之前只修了基础版 `PaymentCallbackService`，改漏了增强版。  
+这是实际生效的代码路径，不修必崩。
+
+---
+
+**不修复的危害时序图：**
+
+```
+CyberSource                 商户系统                      订单系统
+     │                          │                              │
+     │  POST /callback/cybersource                             │
+     │  Header: v-c-signature: "abc123"                        │
+     │ ──────────────────────────▶│                            │
+     │                            │                            │
+     │                            │ signature = headers.get("X-Signature")
+     │                            │              ↑ 取到 null !!
+     │                            │                            │
+     │                            │ verifyCallback(body, null, headers)
+     │                            │ → null != expectedSignature
+     │                            │ → 签名验证失败 ❌           │
+     │                            │                            │
+     │                            │ callbackLog.status = "FAILED"
+     │                            │                            │
+     │   HTTP 200 "SUCCESS"       │                            │
+     │ ◀──────────────────────────│                            │
+     │                            │                            │
+     │  (CyberSource 认为已收到，不重发)                        │
+     │                            │                            │
+     │  用户付款 100 元 ✅          │                            │
+     │  PAYMENT_TRANSACTION       │                            │
+     │  status 永远是 PENDING ❌   │ 订单永远是 UNPAID ❌        │
+     │                            │ 货永远不发 ❌               │
+     │                            │ 客服无法处理 ❌             │
+```
+
+**实际后果**：
+- 用户付款成功，但订单状态永远停在 `PENDING`
+- 财务对账：支付系统显示已收款，订单系统显示未付款，两边对不上
+- 退款需要人工介入（已扣款但系统认为未付）
+- **每一笔 CyberSource 支付都会出现此问题，影响 100% 的 CyberSource 订单**
+
+---
+
+### Bug B 🔴 — `PaymentService` 幂等键使用时间戳（高危）
+
+**文件**：`PaymentService.java` `generateIdempotencyKey()` 方法
+
+**问题代码**：
+```java
+// ❌ 时间戳每次不同 → 同一笔订单每次请求都有新 key → 幂等完全失效
+private String generateIdempotencyKey(PaymentInitRequest request) {
+    return request.getOrderReference() + "_" +
+           request.getAmount().toString() + "_" +
+           System.currentTimeMillis();  // ← 绝对不能用！
+}
+```
+
+**修复代码**：
+```java
+// ✅ 三级策略，全部语义稳定，无时间戳
+private String generateIdempotencyKey(PaymentInitRequest request) {
+    // 策略1: 前端传 UUID（最推荐）
+    if (notEmpty(request.getIdempotencyToken())) return request.getIdempotencyToken();
+    // 策略2: 订单号 + 支付方式
+    if (notEmpty(request.getPaymentMethod()))
+        return request.getOrderReference() + "_" + request.getPaymentMethod();
+    // 策略3: 订单号 + 渠道（channel override 场景）
+    if (notEmpty(request.getChannel()))
+        return request.getOrderReference() + "_" + request.getChannel();
+    // 以上都没有 → 拒绝处理，防止重复扣款
+    throw new PaymentException("请求缺少幂等标识");
+}
+```
+
+**注意**：`PaymentController` 注入的是 `PaymentService`（非 Enhanced），所以这个 Bug 影响实际生效的支付入口。
+
+---
+
+**不修复的危害时序图：**
+
+```
+前端（用户）              商户系统                    CyberSource
+    │                        │                             │
+    │ POST /payment/initiate  │                             │
+    │ { orderRef: "CSP001",   │                             │
+    │   paymentMethod: "VISA" │                             │
+    │   amount: 100 }         │                             │
+    │ ───────────────────────▶│                             │
+    │                         │ key = "CSP001_100_1748600001000"
+    │                         │ SELECT → 不存在             │
+    │                         │ INSERT PAYMENT_TXN ✅       │
+    │                         │ POST /pts/v2/payments ─────▶│
+    │  [网络超时，没有响应]    │◀─────────────── 200 ── CSId=cs001
+    │                         │ UPDATE status=PENDING ✅    │
+    │                         │                             │
+    │  前端超时重试            │                             │
+    │ POST /payment/initiate  │                             │
+    │ { 同上 }                │                             │
+    │ ───────────────────────▶│                             │
+    │                         │ key = "CSP001_100_1748600002500"
+    │                         │          ↑ 时间不同，新key!  │
+    │                         │ SELECT → 不存在（新key查不到已有记录）
+    │                         │ INSERT PAYMENT_TXN ✅（第二条！）
+    │                         │ POST /pts/v2/payments ─────▶│
+    │                         │◀─────────────── 200 ── CSId=cs002
+    │                         │                             │
+    │  用户被扣款两次！        │  两条 PAYMENT_TXN 记录      │
+    │  损失 100 × 2 = 200 元  │  两笔 CyberSource 扣款      │
+```
+
+**实际后果**：
+- 用户网络抖动重试时产生重复扣款，触发率约等于网络不稳定率（移动端尤其高）
+- 法律风险：未经授权的双重扣款，违反 PCI DSS 规范
+- 退款成本：每笔重复扣款需要人工退款 + CyberSource 退款手续费
+
+---
+
+### Bug C 🟡 — `buildSuccessResponse()` 缺少 CYBERSOURCE case（低危）
+
+**文件**：`PaymentCallbackController.java`
+
+**问题代码**：
+```java
+switch (channel) {
+    case ALIPAY: return ResponseEntity.ok("success");
+    case CCB:    return ResponseEntity.ok("OK");
+    default:     return ResponseEntity.ok("SUCCESS");  // CYBERSOURCE 走这里，功能可用但不明确
+}
+```
+
+**修复代码**：
+```java
+switch (channel) {
+    case ALIPAY:       return ResponseEntity.ok("success");
+    case CCB:          return ResponseEntity.ok("OK");
+    case CYBERSOURCE:  return ResponseEntity.ok("SUCCESS");  // ✅ 显式处理
+    default:           return ResponseEntity.ok("SUCCESS");
+}
+```
+
+同时新增专属 endpoint `/cybersource`：
+```java
+@PostMapping("/cybersource")
+public ResponseEntity<String> handleCyberSourceCallback(...) {
+    return handleCallback("cybersource", rawBody, headers, request);
+}
+```
+
+**危害**：功能上 default 也能正常工作（HTTP 200 CyberSource 接受），但：
+- 代码意图不清晰，维护者容易误判
+- 若将来某个渠道需要特殊响应格式，switch 会漏掉 CYBERSOURCE
+
+---
+
+## 完整时序图
+
+### 时序图一：正常 CyberSource 支付流程
+
+```
+前端                  商户后端                  CyberSource              发卡行(HSBC等)
+ │                       │                           │                          │
+ │ ① GET /flex-key       │                           │                          │
+ │ ──────────────────────▶│                           │                          │
+ │                        │ POST /flex/v2/tokens/keys │                          │
+ │                        │ ──────────────────────────▶                          │
+ │                        │◀─────── captureContext JWT                           │
+ │◀── captureContext ────│                           │                          │
+ │                        │                           │                          │
+ │ ② 渲染 Flex Microform  │                           │                          │
+ │    用户输入卡号         │                           │                          │
+ │    (卡号直接到CS服务器) │ ◀══════════════════════════ transientToken           │
+ │    得到 transientToken │                           │                          │
+ │                        │                           │                          │
+ │ ③ POST /payment/initiate                           │                          │
+ │ { paymentMethod:VISA,  │                           │                          │
+ │   transientToken: xxx, │                           │                          │
+ │   idempotencyToken: uuid}                          │                          │
+ │ ──────────────────────▶│                           │                          │
+ │                        │ selectGateway("VISA")     │                          │
+ │                        │ → CyberSourceGatewayClient│                          │
+ │                        │                           │                          │
+ │                        │ Redis分布式锁              │                          │
+ │                        │ 双重检查SELECT → 不存在    │                          │
+ │                        │ INSERT PAYMENT_TXN(INIT)  │                          │
+ │                        │                           │                          │
+ │                        │ ④ POST /pts/v2/payments   │                          │
+ │                        │ Authorization: Signature  │                          │
+ │                        │ tokenInfo.transientTokenJwt                          │
+ │                        │ processingInfo.capture:true                          │
+ │                        │ ──────────────────────────▶                          │
+ │                        │                           │ Flex token → 真实卡号    │
+ │                        │                           │ ──────────────────────────▶
+ │                        │                           │◀─── 授权成功 ─────────────
+ │                        │ ◀── 200 { id: "cs001",   │                          │
+ │                        │          status:COMPLETED}│                          │
+ │                        │                           │                          │
+ │                        │ UPDATE PAYMENT_TXN        │                          │
+ │                        │ gatewayTxnId="cs001"      │                          │
+ │                        │ status=PENDING            │                          │
+ │                        │ 事务提交 → 释放锁          │                          │
+ │                        │                           │                          │
+ │◀── 200 { transactionId,│                           │                          │
+ │         status:PENDING}│                           │                          │
+```
+
+---
+
+### 时序图二：CyberSource Webhook 回调流程（含幂等保护）
+
+```
+CyberSource              商户后端                           DB / Redis
+     │                       │                                   │
+     │  ⑤ POST /callback/cybersource                            │
+     │  Header: v-c-signature: "hmac-abc"                       │
+     │  Body: { eventType:"payments.updated",                   │
+     │          payload:[{ data:{ object:{                       │
+     │            id:"cs001", status:"COMPLETED" }}}]}           │
+     │ ──────────────────────▶│                                  │
+     │                        │ 限流检查 (RateLimiter)           │
+     │                        │ fromCallbackPath("cybersource")  │
+     │                        │ → PaymentChannel.CYBERSOURCE     │
+     │                        │ 异步处理（立即返回HTTP 200）      │
+     │◀── HTTP 200 "SUCCESS" ─│                                  │
+     │    (CyberSource 不会重发)                                  │
+     │                        │                                  │
+     │                        │ ── 异步线程开始 ──               │
+     │                        │                                  │
+     │                        │ 层1: 验签                        │
+     │                        │ signature = headers              │
+     │                        │   .getOrDefault("v-c-signature", │
+     │                        │    headers.get("X-Signature"))   │
+     │                        │      = "hmac-abc" ✅             │
+     │                        │ verifyCallback(body, sig, headers)
+     │                        │ HMAC-SHA256(webhookSecret, body) │
+     │                        │ == "hmac-abc" → 验签通过 ✅      │
+     │                        │                                  │
+     │                        │ 层2: Redis去重                   │
+     │                        │ key = "callback:processed:cs001:SUCCESS"
+     │                        │ setIfAbsent → true (首次) ✅     │
+     │                        │   ──────────────────────────────▶│
+     │                        │                                  │ SET key=1 EX 86400
+     │                        │                                  │
+     │                        │ parseCallbackData():             │
+     │                        │ cs_status="COMPLETED"            │
+     │                        │ → mapCyberSourceStatus()         │
+     │                        │ → "SUCCESS"                      │
+     │                        │                                  │
+     │                        │ SELECT PAYMENT_TXN               │
+     │                        │ WHERE gatewayTxnId="cs001"       │
+     │                        │   ──────────────────────────────▶│
+     │                        │◀──── TXN(status=PENDING,ver=1) ──│
+     │                        │                                  │
+     │                        │ 层3: 终态检查                    │
+     │                        │ PENDING ≠ 终态 → 继续 ✅         │
+     │                        │                                  │
+     │                        │ 乐观锁更新                       │
+     │                        │ UPDATE PAYMENT_TXN               │
+     │                        │ SET status="SUCCESS", ver=ver+1  │
+     │                        │ WHERE id=? AND ver=1             │
+     │                        │   ──────────────────────────────▶│
+     │                        │◀──── 影响行数=1 ✅ ──────────────│
+     │                        │                                  │
+     │                        │ notifyOrderSystem() [TODO: MQ]   │
+     │                        │                                  │
+     │                        │ 写 PAYMENT_CALLBACK_LOG ✅       │
+     │                        │   ──────────────────────────────▶│
+     │                        │                                  │
+     │  (若 CyberSource 重发)  │                                  │
+     │ ──────────────────────▶│                                  │
+     │                        │ Redis去重: key已存在             │
+     │                        │ → DUPLICATE_REDIS，丢弃 ✅       │
+     │◀── HTTP 200 "SUCCESS" ─│                                  │
+```
+
+---
+
+### 时序图三：幂等防重复扣款（Redis 分布式锁）
+
+```
+线程A（用户首次点击）          线程B（用户重复点击/网络重试）     Redis      DB
+       │                               │                         │          │
+       │ initiatePayment(req)          │                         │          │
+       │ idempotencyKey = "CSP001_VISA"│                         │          │
+       │                               │                         │          │
+       │ lock.tryLock("CSP001_VISA")──────────────────────────▶  │          │
+       │◀─── 获锁成功 ─────────────────────────────────────────  │          │
+       │                               │                         │          │
+       │  BEGIN TRANSACTION            │                         │          │
+       │  SELECT WHERE key="CSP001_VISA" ──────────────────────────────────▶│
+       │◀─────────────────────────────────────── 不存在 ─────────────────── │
+       │  INSERT PAYMENT_TXN ──────────────────────────────────────────────▶│
+       │  POST /pts/v2/payments → CyberSource ✅                 │          │
+       │  UPDATE status=PENDING ───────────────────────────────────────────▶│
+       │  COMMIT ✅（事务此刻提交）    │                         │          │
+       │                               │ lock.tryLock("CSP001_VISA")        │
+       │                               │ ───────────────────────▶│          │
+       │                               │◀────── 等待中（A还持锁）│          │
+       │ lock.unlock() ────────────────────────────────────────▶ │          │
+       │                               │◀────── 获锁成功 ────────│          │
+       │                               │                         │          │
+       │                               │ 双重检查                │          │
+       │                               │ SELECT WHERE key="CSP001_VISA" ───▶│
+       │                               │◀────────── 已存在！(A刚提交) ──────│
+       │                               │                         │          │
+       │                               │ 直接返回原交易结果 ✅    │          │
+       │                               │ 不调 CyberSource ✅     │          │
+       │                               │ 不重复扣款 ✅           │          │
+```
+
+---
+
+### 时序图四：CyberSource 退款流程（财务审批 → 执行）
+
+```
+财务人员              商户后台              商户后端                  CyberSource
+    │                    │                     │                           │
+    │ 登录财务后台        │                     │                           │
+    │ (JWT含parentGroupId=345)                 │                           │
+    │ ──────────────────▶│                     │                           │
+    │                    │                     │                           │
+    │ 查看退款申请列表    │                     │                           │
+    │ GET /finance/refund/list                 │                           │
+    │ ──────────────────▶│ ──────────────────▶ │                           │
+    │◀── PENDING_REVIEW申请列表 ───────────────│                           │
+    │                    │                     │                           │
+    │ 审批通过            │                     │                           │
+    │ POST /finance/refund/approve             │                           │
+    │ ──────────────────▶│ ──────────────────▶ │                           │
+    │                    │                     │ 验证财务角色               │
+    │                    │                     │ parentGroupId==345 ✅      │
+    │                    │                     │ 写 REFUND_AUDIT_LOG ✅     │
+    │◀── 审批成功 ────── │                     │                           │
+    │                    │                     │                           │
+    │                    │   [异步执行退款]      │                           │
+    │                    │                     │ 状态 REFUNDING（乐观锁抢占）
+    │                    │                     │                           │
+    │                    │                     │ ① POST /pts/v2/refunds    │
+    │                    │                     │ { paymentInformation:     │
+    │                    │                     │     captureId: "cs001",   │
+    │                    │                     │   orderInfo:              │
+    │                    │                     │     totalAmount: "50.00"} │
+    │                    │                     │ ─────────────────────────▶│
+    │                    │                     │ Authorization: Signature  │
+    │                    │                     │◀──── 200 { id:"rf001",    │
+    │                    │                     │      status:"PENDING" }   │
+    │                    │                     │                           │
+    │ 刷新页面看结果      │                     │ 状态 PARTIALLY_REFUNDED   │
+    │ ──────────────────▶│                     │（部分退款，未超过原金额）  │
+    │◀── COMPLETED ─────│                     │ 或 REFUNDED（全额退款）   │
+```
+
+---
+
+## 完整影响范围（含 v2 Bug 修复）
+
+| 组件 | 变更类型 | 状态 | 备注 |
+|------|---------|------|------|
+| `pom.xml` | 新增依赖 | ✅ 已完成 | `cybersource-rest-client-java:0.0.55` |
+| `PaymentChannel.java` | 新增枚举值 | ✅ 已完成 | 加 `CYBERSOURCE("CYBERSOURCE","CyberSource","cybersource")` |
+| `CyberSourceGatewayClient.java` | 新增文件 | ✅ 已完成 | 530行，含 HTTP Signature / 幂等 / 退款 / 回调验签 |
+| `StandardCharteredGatewayClient.java` | 修改 | ✅ 已完成 | `supportsPaymentMethod()` 改返回 false，SCB 不参与自动路由 |
+| `PaymentGatewayRouter.java` | 修改路由逻辑 | ✅ 已完成 | VISA/MC/AMEX → CYBERSOURCE；新增 `selectGateway(method, channelOverride)` |
+| `PaymentCallbackServiceEnhanced.java` | **Bug A 修复** | ✅ 已修复 | signature 改 `getOrDefault("v-c-signature","X-Signature")`（高危修复） |
+| `PaymentCallbackService.java` | 微调 | ✅ 已完成 | 同 Bug A，基础版同步修复 |
+| `PaymentService.java` | **Bug B 修复** | ✅ 已修复 | `generateIdempotencyKey()` 去掉时间戳，改三级稳定幂等策略（高危修复） |
+| `PaymentServiceEnhanced.java` | 微调 | ✅ 已完成 | `initiatePayment()` 支持 `request.getChannel()` 覆盖 |
+| `PaymentCallbackController.java` | **Bug C 修复** + 新增端点 | ✅ 已完成 | 加 CYBERSOURCE case；新增 `POST /callback/cybersource` 专属端点 |
+| `application.yml` | 新增配置 | ✅ 已完成 | `cybersource.*`（merchant-id / key-id / shared-secret-key） |
+| `PaymentInitRequest.java` | 微调 | ✅ 已完成 | 新增 `transientToken` 和 `channel` 字段 |
+| 渣打专属页面（前端） | 需修改 | ⏳ 待前端处理 | request 加 `"channel":"SCB"` |
+| 普通信用卡页面（前端） | 需实现 | ⏳ 待前端处理 | 集成 CyberSource Flex Microform v2 |
+| `RefundApprovalService.java` | **不需要改动** | ✅ 已验证 | 退款流程通过 `GATEWAY_NAME="CYBERSOURCE"` 自动路由 |
+| `PAYMENT_TRANSACTION` 表 | **不需要改动** | ✅ 已验证 | 现有字段已满足 CyberSource 存储需求 |
+

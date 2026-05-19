@@ -189,12 +189,35 @@ public class PaymentService {
     }
 
     /**
-     * 生成幂等键
+     * 生成幂等键（修复版 - 去掉时间戳 Bug）
+     *
+     * 优先级：
+     *   策略1：前端传递幂等 Token（UUID，强烈推荐）
+     *   策略2：订单号 + 支付方式（前端无 Token 时的兜底）
+     *   策略X：❌ 已删除（原来用时间戳，每次请求 key 不同，幂等完全失效，可导致重复扣款！）
      */
     private String generateIdempotencyKey(PaymentInitRequest request) {
-        return request.getOrderReference() + "_" +
-               request.getAmount().toString() + "_" +
-               System.currentTimeMillis();
+        // ✅ 策略1：前端传递幂等 Token（UUID，最推荐）
+        if (request.getIdempotencyToken() != null && !request.getIdempotencyToken().isEmpty()) {
+            log.debug("使用前端幂等Token：{}", request.getIdempotencyToken());
+            return request.getIdempotencyToken();
+        }
+        // ✅ 策略2：订单号 + 支付方式（语义稳定，适合一订单支持多种支付方式）
+        if (request.getPaymentMethod() != null && !request.getPaymentMethod().isEmpty()) {
+            String key = request.getOrderReference() + "_" + request.getPaymentMethod();
+            log.debug("使用订单号+支付方式作为幂等键：{}", key);
+            return key;
+        }
+        // ✅ 策略3（兜底）：订单号 + 渠道（channel 覆盖时 paymentMethod 可能为空）
+        if (request.getChannel() != null && !request.getChannel().isEmpty()) {
+            String key = request.getOrderReference() + "_" + request.getChannel();
+            log.debug("使用订单号+渠道作为幂等键：{}", key);
+            return key;
+        }
+        // ❌ 绝不使用时间戳（原 Bug：System.currentTimeMillis() → 每次不同 → 幂等失效）
+        log.error("收到不完整请求：订单号={}，idempotencyToken/paymentMethod/channel 均为空，拒绝处理防重复扣款",
+                request.getOrderReference());
+        throw new PaymentException("请求缺少幂等标识：请传递 idempotencyToken（推荐）或 paymentMethod 字段");
     }
 
     /**
