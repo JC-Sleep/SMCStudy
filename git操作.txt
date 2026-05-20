@@ -22,7 +22,19 @@ git commit -m "Initial commit"
 # 推送代码
 git push -u origin main
 
+---------------------------------------------------------====查看远程分支
+git branch -r 查看所有远程分支
+git branch -a 查看本地 + 远程所有分支
 
+-----------------------------------------------------========= 查看本地分支与远程的关联关系
+1. 最清晰、最推荐（直接显示关联）:  git branch -vv
+      [origin/master] = 已关联远程
+      没有中括号 = 未关联
+
+2. 只看当前所在分支的关联 : git status
+     如果关联了，会显示：
+           Your branch is up to date with 'origin/master'.
+------------------------------------------------------------=======
 1. 查看当前工作区（未提交）的修改数量
 方法一：最精确统计（推荐）
 使用 git diff 配合统计参数，可以直观看到有多少个文件被修改，以及增加了多少行代码。
@@ -51,6 +63,32 @@ git show --shortstat
 比如你想看当前分支比 main 分支多改了多少文件：
 git diff main..HEAD --stat
 
+
+
+-----------------------------------------===== Git 完整操作：拉取远程分支 → 本地改名 → 推送新分支到远程
+# 1. 拉取远程最新分支
+git fetch origin
+
+# 2. 拉取远程分支并本地改名（替换成你的名字）
+git checkout -b new-branch origin/old-branch
+
+# 3. 推送到远程
+git push origin new-branch
+
+# 4. 建立关联（推荐）
+git push --set-upstream origin new-branch
+
+-------------------------------------------======访问github失败，代理
+方案 1 : 让 Git 使用你的代理
+如果你开了梯子，执行这两行（复制直接用）：
+git config --global http.proxy 127.0.0.1:6454
+git config --global https.proxy 127.0.0.1:76454
+大多数代理端口都是 7890，如果不行换成 7890，7897、10809 试试。
+
+
+方案 2：使用 GitHub 镜像（最稳、不用代理、直接能用）
+复制这 一行命令 执行：
+git config --global url."https://ghproxy.net/https://github.com".insteadOf https://github.com
 
 前这个系统是开发成都，我不知道有没有这个，目前开发情况是看订单处理的最终一致性这个文档，如果有增加功能请添加，完成下面的，顺便也列出下面文档的原来和解决情况，最好是时序图
 kafka处理：Kafka 使用异步处理，削峰填谷，如何保证订单处理的最终一致性？当 Kafka 消息积压时，系统如何应对？异步处理提前给user返回成功吗？还是等 Kafka 处理完成后再返回结果？如果提前返回成功，后续处理失败时需要补偿机制。
