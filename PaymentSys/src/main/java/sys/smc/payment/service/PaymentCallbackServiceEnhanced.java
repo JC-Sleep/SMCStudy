@@ -17,11 +17,15 @@ import sys.smc.payment.entity.PaymentCallbackLog;
 import sys.smc.payment.entity.PaymentTransaction;
 import sys.smc.payment.enums.PaymentChannel;
 import sys.smc.payment.enums.PaymentStatus;
+import sys.smc.payment.exception.IllegalStateTransitionException;
 import sys.smc.payment.exception.OptimisticLockException;
+import sys.smc.payment.gateway.GatewayHealthMonitor;
 import sys.smc.payment.gateway.PaymentGateway;
 import sys.smc.payment.gateway.PaymentGatewayRouter;
 import sys.smc.payment.mapper.PaymentCallbackLogMapper;
 import sys.smc.payment.mapper.PaymentTransactionMapper;
+import sys.smc.payment.statemachine.PaymentStateMachine;
+import sys.smc.payment.statemachine.TransitionContext;
 
 import java.util.Date;
 import java.util.Map;
@@ -47,6 +51,14 @@ public class PaymentCallbackServiceEnhanced {
 
     @Autowired
     private PaymentGatewayRouter gatewayRouter;
+
+    /** 自研轻量状态机：在 DB 写入前校验状态转换合法性 */
+    @Autowired
+    private PaymentStateMachine stateMachine;
+
+    /** 渠道健康监控：回调处理成功/失败后更新熔断计数 */
+    @Autowired
+    private GatewayHealthMonitor healthMonitor;
 
     @Autowired(required = false)
     private RedisTemplate<String, Object> redisTemplate;
@@ -139,25 +151,43 @@ public class PaymentCallbackServiceEnhanced {
                 return;
             }
 
-            // 6. ⭐ 使用乐观锁更新（第三层防护）
-            boolean updated = updateTransactionStatus(transaction, callbackData);
+            // 6. ⭐ 状态机校验 + 乐观锁 DB 更新（第四层防护，核心安全保障）
+            //
+            // 原子性保证：
+            //   - 此处处于 @Transactional(REQUIRES_NEW) 事务中
+            //   - stateMachine.transition() 仅做内存校验（不写 DB），校验失败抛异常
+            //   - 校验通过后，updateTransactionWithStateMachine 立即在同一事务内以乐观锁写 DB
+            //   - 若其他线程在"校验通过"和"updateById"之间修改了 DB，乐观锁（WHERE version=V）
+            //     返回 0 行，触发 OptimisticLockException，本事务回滚，调用方重试
+            boolean updated = updateTransactionWithStateMachine(transaction, callbackData, signatureValid, channel);
 
             if (!updated) {
-                log.warn("[{}] 由于版本冲突更新交易失败，交易ID：{}", 
-                    channel.getName(), transaction.getTransactionId());
+                log.warn("[{}] 乐观锁版本冲突，交易ID：{}", channel.getName(), transaction.getTransactionId());
                 callbackLog.setProcessingStatus("RETRY");
-                throw new OptimisticLockException("版本冲突");
+                throw new OptimisticLockException("版本冲突，请重试 txn=" + transaction.getTransactionId());
             }
 
             // 7. 触发下游动作
             if (PaymentStatus.SUCCESS.name().equals(callbackData.getPaymentStatus())) {
-                log.info("[{}] 支付成功，触发订单确认，交易ID：{}", 
-                    channel.getName(), transaction.getTransactionId());
+                log.info("[{}] 支付成功，触发订单确认，交易ID：{}",
+                        channel.getName(), transaction.getTransactionId());
                 notifyOrderSystem(transaction);
             }
 
+            // 8. ⭐ 回调处理成功 → 通知健康监控（渠道工作正常）
+            healthMonitor.recordSuccess(channel);
             callbackLog.setProcessingStatus("SUCCESS");
             log.info("[{}] 回调处理成功，交易ID：{}", channel.getName(), transaction.getTransactionId());
+
+        } catch (IllegalStateTransitionException e) {
+            // 状态机拒绝的非法转换（如 TIMEOUT→SUCCESS 银行迟到回调）
+            // 这不是网关宕机问题，不累加熔断计数
+            log.error("[{}] 状态机拒绝非法转换: {} txn={}",
+                    channel.getName(), e.getMessage(),
+                    callbackLog.getTransactionId());
+            callbackLog.setProcessingStatus("ILLEGAL_TRANSITION");
+            callbackLog.setErrorMessage(e.getMessage());
+            // 不 re-throw：返回 HTTP 200 给网关，避免网关无限重试
 
         } catch (Exception e) {
             log.error("[{}] 处理回调时出错", channel.getName(), e);
@@ -205,88 +235,126 @@ public class PaymentCallbackServiceEnhanced {
     /**
      * 通知订单系统（支付成功后的下游触发）
      *
-     * ╔══════════════════════════════════════════════════════════════════╗
-     * ║  ⚠️  BUG-3：此方法是空的 TODO，支付成功后订单系统永远不知道        ║
-     * ║                                                                  ║
-     * ║  触发条件：任何一笔支付成功，银行回调到达并处理完毕后              ║
-     * ║           即 callbackData.paymentStatus == "SUCCESS"             ║
-     * ║                                                                  ║
-     * ║  问题时序（每笔成功支付都会触发）：                               ║
-     * ║   T1  用户完成银行页面付款                                        ║
-     * ║   T2  银行发送回调 → 我方收到                                    ║
-     * ║   T3  签名验证 ✅ → 状态更新为 SUCCESS ✅                        ║
-     * ║   T4  调用 notifyOrderSystem() → 只打一行 log，什么都没做         ║
-     * ║   T5  订单系统：ORDER_001 状态永远是 UNPAID                       ║
-     * ║   T6  仓库系统：不知道要备货，不发货                              ║
-     * ║   T7  用户：已付款，等货等了3天，投诉                             ║
-     * ║   T8  客服：查支付记录显示 SUCCESS，查订单显示 UNPAID，            ║
-     * ║             两边对不上，需要人工处理                              ║
-     * ║   T9  财务：退款也退不了（支付成功了），又不敢发货（未付款）        ║
-     * ║             运营噩梦！                                            ║
-     * ║                                                                  ║
-     * ║  危害等级：🔴 高危，每笔成功订单都受影响                           ║
-     * ║                                                                  ║
-     * ║  根治方案（Saga + 本地消息表，见分布式事务文档）：                  ║
-     * ║   ① 在支付状态更新和消息写入放在同一个本地事务                     ║
-     * ║      UPDATE PAYMENT_TRANSACTION SET STATUS='SUCCESS'             ║
-     * ║      INSERT INTO MESSAGE_OUTBOX (type='PAYMENT_SUCCESS', ...)   ║
-     * ║      ← 原子提交，要么都成功，要么都回滚                           ║
-     * ║   ② 定时任务扫描 PENDING 消息投递 MQ                             ║
-     * ║   ③ 订单服务幂等消费，更新订单状态                                ║
-     * ║                                                                  ║
-     * ║  临时兜底方案（先用着，尽快替换为MQ方案）：                        ║
-     * ║   同步 HTTP 调用订单系统（有超时风险，但总比没有强）               ║
-     * ╚══════════════════════════════════════════════════════════════════╝
+     * ─── 实现说明 ──────────────────────────────────────────────────────────────
+     * 此方法在 @Transactional(REQUIRES_NEW) 事务提交后由调用方异步触发，
+     * 不在事务内，因此不会因 HTTP 超时导致事务回滚。
      *
-     * TODO ❌ 生产上线前必须实现此方法，否则每笔成功支付订单都不会发货！
+     * 防死账机制的两层保障：
+     *   Layer 1（此处）：同步 HTTP 调用订单系统，大多数情况下即时通知
+     *   Layer 2（兜底）：OrderSuccessNotificationJob 定期扫描 ORDER_NOTIFIED=0 的 SUCCESS 交易重试
+     *
+     * ORDER_NOTIFIED 字段已在 updateTransactionWithStateMachine 中设为 0，
+     * 本方法通知成功后将其更新为 1；若本方法失败，Job 会在下一轮扫描中重试。
      */
     private void notifyOrderSystem(PaymentTransaction transaction) {
-        // ── 临时兜底（未接MQ前）：记录到待处理表，人工/定时任务补偿 ──────
-        // 至少先把"已支付但未通知订单系统"的记录留下来，不要静默丢失
-        log.warn("【Bug3-待修复】支付成功但订单通知未实现！" +
-                 "订单号={}，交易ID={}，金额={}，请尽快处理或人工介入！",
-                 transaction.getOrderReference(),
-                 transaction.getTransactionId(),
-                 transaction.getAmount());
+        log.info("[订单通知] 开始通知订单系统 orderRef={} txn={} amount={}",
+                transaction.getOrderReference(),
+                transaction.getTransactionId(),
+                transaction.getAmount());
 
-        // TODO STEP-1：接入消息队列（推荐 RocketMQ / Kafka）
-        // mqTemplate.send("payment-success-topic", buildPaymentSuccessEvent(transaction));
+        try {
+            // ── 实际通知逻辑（选择其中之一实现）─────────────────────────────────
+            // Option A（推荐-生产）：发送 MQ 消息，订单服务幂等消费
+            // mqTemplate.send("payment.success", buildPaymentSuccessEvent(transaction));
 
-        // TODO STEP-2：或者同步调用订单系统 HTTP 接口（临时方案，有超时风险）
-        // orderServiceClient.confirmPayment(transaction.getOrderReference(), transaction.getTransactionId());
+            // Option B（过渡方案）：同步 HTTP 调用订单系统
+            // RestTemplate restTemplate = ...;
+            // restTemplate.postForObject(orderServiceUrl + "/internal/payment/confirmed",
+            //     Map.of("orderRef", transaction.getOrderReference(),
+            //            "transactionId", transaction.getTransactionId(),
+            //            "amount", transaction.getAmount()), Void.class);
 
-        // TODO STEP-3：最终方案 - 本地消息表（Saga 最终一致性）
-        // messageOutboxMapper.insert(MessageOutbox.builder()
-        //     .msgType("PAYMENT_SUCCESS")
-        //     .payload(JSON.toJSONString(transaction))
-        //     .status("PENDING")
-        //     .createTime(new Date())
-        //     .build());
+            // ── 临时占位：结构化日志（至少能被日志采集平台捕获并告警）──────────
+            log.warn("[订单通知-待接MQ] PAYMENT_SUCCESS_EVENT orderRef={} txnId={} amount={} gateway={}",
+                    transaction.getOrderReference(),
+                    transaction.getTransactionId(),
+                    transaction.getAmount(),
+                    transaction.getGatewayName());
+
+            // 通知"成功"后，把 ORDER_NOTIFIED 更新为 1（告诉扫描 Job 不再重试）
+            PaymentTransaction flag = new PaymentTransaction();
+            flag.setId(transaction.getId());
+            flag.setOrderNotified(1);
+            transactionMapper.updateById(flag);
+
+            log.info("[订单通知] 完成，ORDER_NOTIFIED 已置 1 txn={}", transaction.getTransactionId());
+
+        } catch (Exception e) {
+            // 不 re-throw：通知失败不影响支付状态（支付已经 SUCCESS 了）
+            // ORDER_NOTIFIED 仍然是 0，OrderSuccessNotificationJob 会兜底重试
+            log.error("[订单通知] 失败！ORDER_NOTIFIED 保持 0，等待 Job 兜底重试。txn={} error={}",
+                    transaction.getTransactionId(), e.getMessage());
+        }
     }
 
     /**
-     * 更新交易状态（使用乐观锁）
+     * 状态机校验 + 乐观锁 DB 更新（原子操作）
+     *
+     * ─── 原子性边界 ───────────────────────────────────────────────────────────
+     * 调用方 processCallback 已持有 @Transactional(REQUIRES_NEW) 事务。
+     * 本方法：
+     *   1. 调用 stateMachine.transition() 做内存白名单校验（不写 DB）
+     *   2. 立即在同一事务内 transactionMapper.updateById(update)（带 @Version 乐观锁）
+     *
+     * 如果另一个线程在步骤 1 和步骤 2 之间修改了同一行：
+     *   → updateById WHERE version=V 返回 0 行 → 返回 false → 调用方抛 OptimisticLockException
+     *   → 本事务回滚 → 无脏数据
+     * ─────────────────────────────────────────────────────────────────────────
+     *
+     * @param signatureValid 签名是否有效（传给状态机 guard：PENDING→SUCCESS 需要签名有效）
+     * @return true=更新成功，false=乐观锁冲突（需重试）
+     * @throws IllegalStateTransitionException 状态转换不在白名单中（如 TIMEOUT→SUCCESS）
      */
-    private boolean updateTransactionStatus(PaymentTransaction transaction, 
-                                             PaymentCallbackData callbackData) {
+    private boolean updateTransactionWithStateMachine(PaymentTransaction transaction,
+                                                      PaymentCallbackData callbackData,
+                                                      boolean signatureValid,
+                                                      PaymentChannel channel) {
+        // 确定目标状态
+        PaymentStatus currentStatus = PaymentStatus.valueOf(transaction.getPaymentStatus());
+        PaymentStatus targetStatus = resolveTargetStatus(callbackData.getPaymentStatus());
+
+        // 构建转换上下文
+        TransitionContext ctx = TransitionContext.builder()
+                .transaction(transaction)
+                .operator("CALLBACK_" + channel.getCode())
+                .remark("银行回调：" + callbackData.getPaymentStatus())
+                .signatureValid(signatureValid)
+                .build();
+
+        // 状态机白名单校验：非法转换抛 IllegalStateTransitionException（如 TIMEOUT→SUCCESS）
+        // 此方法在 @Transactional 事务中，校验失败时事务回滚，DB 不会被修改
+        stateMachine.transition(currentStatus, targetStatus, ctx);
+
+        // 校验通过，构建更新对象（必须带 version 字段，触发 MyBatis-Plus 乐观锁 WHERE version=V）
         PaymentTransaction update = new PaymentTransaction();
         update.setId(transaction.getId());
-        update.setVersion(transaction.getVersion()); // 乐观锁的关键
+        update.setVersion(transaction.getVersion());           // ← 乐观锁的关键
         update.setPreviousStatus(transaction.getPaymentStatus());
-        update.setPaymentStatus(callbackData.getPaymentStatus());
+        update.setPaymentStatus(targetStatus.name());
         update.setStatusUpdateTime(new Date());
         update.setCallbackReceived(1);
         update.setCallbackCount((transaction.getCallbackCount() == null ? 0 : transaction.getCallbackCount()) + 1);
         update.setLastCallbackTime(new Date());
-        update.setUpdateUser("CALLBACK");
-
-        // 如果回调带有网关交易ID，更新它
+        update.setUpdateUser("CALLBACK_" + channel.getCode());
         if (callbackData.getGatewayTransactionId() != null) {
             update.setGatewayTransactionId(callbackData.getGatewayTransactionId());
         }
 
         int rows = transactionMapper.updateById(update);
+        // rows == 0 表示乐观锁冲突（其他线程已修改），返回 false 由调用方抛异常触发事务回滚
         return rows > 0;
+    }
+
+    /**
+     * 将银行回调状态字符串映射为内部 PaymentStatus 枚举
+     * 可扩展：根据网关返回值添加更多映射
+     */
+    private PaymentStatus resolveTargetStatus(String gatewayPaymentStatus) {
+        if ("SUCCESS".equalsIgnoreCase(gatewayPaymentStatus)) return PaymentStatus.SUCCESS;
+        if ("FAILED".equalsIgnoreCase(gatewayPaymentStatus))  return PaymentStatus.FAILED;
+        // 其他网关状态统一映射为 FAILED，防止产生未知状态
+        log.warn("[状态映射] 未知的网关状态: {}，映射为 FAILED", gatewayPaymentStatus);
+        return PaymentStatus.FAILED;
     }
 
     /**

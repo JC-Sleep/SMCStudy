@@ -200,5 +200,18 @@ public class PaymentTransaction extends BaseEntity {
      */
     @TableField("ERROR_MESSAGE")
     private String errorMessage;
+
+    /**
+     * 是否已通知订单系统（0=未通知, 1=已通知成功）
+     *
+     * 用于"死账消灭"补偿机制：
+     *   - 支付成功时（来自银行回调 或 对账修正）写入 0
+     *   - OrderSuccessNotificationJob 扫描此字段，通知订单系统后改为 1
+     *   - 即使 MQ/HTTP 调用失败，job 会重试，确保最终一致性
+     *
+     * DDL: ALTER TABLE PAYMENT_TRANSACTION ADD ORDER_NOTIFIED NUMBER(1) DEFAULT 0;
+     */
+    @TableField("ORDER_NOTIFIED")
+    private Integer orderNotified;
 }
 

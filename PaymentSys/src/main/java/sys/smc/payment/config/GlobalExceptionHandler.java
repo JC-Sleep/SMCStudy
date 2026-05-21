@@ -10,8 +10,10 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import sys.smc.payment.dto.ApiResponse;
 import sys.smc.payment.exception.GatewayException;
+import sys.smc.payment.exception.IllegalStateTransitionException;
 import sys.smc.payment.exception.OptimisticLockException;
 import sys.smc.payment.exception.PaymentException;
+import sys.smc.payment.exception.ServiceUnavailableException;
 import sys.smc.payment.exception.UnauthorizedException;
 
 import java.util.stream.Collectors;
@@ -54,6 +56,34 @@ public class GlobalExceptionHandler {
     public ApiResponse<?> handleGatewayException(GatewayException e) {
         log.error("网关异常：{}", e.getMessage(), e);
         return ApiResponse.error("支付网关错误：" + e.getMessage());
+    }
+
+    /**
+     * 渠道熔断异常（HTTP 503）
+     * 当 GatewayHealthMonitor 检测到渠道连续失败并熔断时抛出
+     */
+    @ExceptionHandler(ServiceUnavailableException.class)
+    public org.springframework.http.ResponseEntity<ApiResponse<?>> handleServiceUnavailableException(
+            ServiceUnavailableException e) {
+        log.warn("[熔断拦截] 渠道 {} 暂时不可用: {}", e.getChannelCode(), e.getMessage());
+        ApiResponse<?> body = ApiResponse.error(
+                "当前支付渠道暂时不可用，请稍后重试或选择其他支付方式");
+        return org.springframework.http.ResponseEntity
+                .status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(body);
+    }
+
+    /**
+     * 非法支付状态转换异常（HTTP 409 Conflict）
+     * 当支付状态机拒绝非法状态转换时抛出（如 TIMEOUT→SUCCESS 绕过对账）
+     * 此异常是业务逻辑拒绝，不应映射为 500 系统错误
+     */
+    @ExceptionHandler(IllegalStateTransitionException.class)
+    @ResponseStatus(HttpStatus.CONFLICT)
+    public ApiResponse<?> handleIllegalStateTransitionException(IllegalStateTransitionException e) {
+        log.error("[状态机] 非法状态转换被拒绝: {} → {} 原因: {}",
+                e.getFromStatus(), e.getToStatus(), e.getMessage());
+        return ApiResponse.error("支付状态异常，操作被拒绝：" + e.getMessage());
     }
 
     /**

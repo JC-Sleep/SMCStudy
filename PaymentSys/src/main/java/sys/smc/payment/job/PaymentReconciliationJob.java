@@ -9,7 +9,6 @@ import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 import sys.smc.payment.entity.PaymentReconciliation;
 import sys.smc.payment.entity.PaymentTransaction;
 import sys.smc.payment.enums.PaymentChannel;
@@ -17,6 +16,7 @@ import sys.smc.payment.enums.PaymentStatus;
 import sys.smc.payment.gateway.PaymentGateway;
 import sys.smc.payment.gateway.PaymentGatewayRouter;
 import sys.smc.payment.gateway.dto.GatewayTransactionStatus;
+import sys.smc.payment.job.ReconciliationProcessor.ReconcileResult;
 import sys.smc.payment.mapper.PaymentReconciliationMapper;
 import sys.smc.payment.mapper.PaymentTransactionMapper;
 
@@ -52,17 +52,27 @@ public class PaymentReconciliationJob {
     private Snowflake snowflake;
 
     /**
+     * 对账记录处理器：每笔交易使用 REQUIRES_NEW 独立事务
+     * 一笔失败不会导致整批回滚（原来 @Transactional 大事务的问题）
+     */
+    @Autowired
+    private ReconciliationProcessor reconciliationProcessor;
+
+    /**
      * 每30分钟自动对账 TIMEOUT 和 PENDING 交易
+     *
+     * 修复：移除 @Transactional（原来所有记录在一个大事务，一笔失败全部回滚）
+     * 改为：每笔交易通过 ReconciliationProcessor.processOne() 独立 REQUIRES_NEW 事务处理
      *
      * ① @SchedulerLock：同一时间只有一个实例执行
      *   lockAtMostFor="25m"：最多持锁25分钟（比cron间隔30分钟短，防止上次未完成新任务启动）
-     *   lockAtLeastFor="10m"：至少持锁10分钟（防止任务太快完成后其他实例立刻抢锁重跑）
+     *   lockAtLeastFor="5m" ：至少持锁5分钟（防止任务太快完成后其他实例立刻抢锁重跑）
      */
     @Scheduled(cron = "${payment.reconciliation.cron:0 */30 * * * ?}")
     @SchedulerLock(name = "reconcileTimeoutTransactions",
                    lockAtMostFor = "PT25M",
                    lockAtLeastFor = "PT5M")
-    @Transactional(rollbackFor = Exception.class)
+    // ⚠️ 不加 @Transactional：每笔记录由 ReconciliationProcessor 独立提交，一笔失败不影响其他笔
     public void reconcileTimeoutTransactions() {
         log.info("=== 开始自动对账TIMEOUT/PENDING交易（ShedLock已获取，单实例执行）===");
         Date startTime = new Date();
@@ -83,48 +93,39 @@ public class PaymentReconciliationJob {
 
         for (PaymentTransaction transaction : timeoutTransactions) {
             try {
-                // ④ 修复：根据 gatewayName 路由到对应渠道（渣打/支付宝/建行）
+                // ④ 根据 gatewayName 路由到对应渠道（渣打/支付宝/建行/CyberSource）
                 GatewayTransactionStatus gatewayStatus = queryGatewayStatus(transaction);
                 if (gatewayStatus == null) {
                     failed++;
                     continue;
                 }
 
-                transaction.setLastQueryTime(new Date());
+                // ⑤ 通过 ReconciliationProcessor 独立事务处理（状态机校验 + 乐观锁写DB）
+                ReconcileResult result = reconciliationProcessor.processOne(transaction, gatewayStatus);
 
-                if (!transaction.getPaymentStatus().equals(gatewayStatus.getStatus())) {
-                    log.warn("⚠️ 状态不匹配 - 交易:{}, 本地:{}, 银行:{}",
-                        transaction.getTransactionId(),
-                        transaction.getPaymentStatus(),
-                        gatewayStatus.getStatus());
-
-                    transaction.setPreviousStatus(transaction.getPaymentStatus());
-                    transaction.setPaymentStatus(gatewayStatus.getStatus());
-                    transaction.setReconciliationStatus("MISMATCH");
-                    transaction.setReconciliationTime(new Date());
-                    transaction.setRemarks("对账修正：" + transaction.getPreviousStatus()
-                        + " -> " + gatewayStatus.getStatus());
-
-                    if (PaymentStatus.SUCCESS.name().equals(gatewayStatus.getStatus())) {
-                        log.error("🚨 严重：支付成功但标记为TIMEOUT，交易ID：{}",
-                            transaction.getTransactionId());
-                        // TODO: 发送告警 + 通知订单系统
-                    }
-                    mismatch++;
-                    mismatchIds.add(transaction.getTransactionId());
-                } else {
-                    transaction.setReconciliationStatus("MATCHED");
-                    matched++;
+                switch (result) {
+                    case MATCHED:
+                        matched++;
+                        break;
+                    case MISMATCH:
+                        mismatch++;
+                        mismatchIds.add(transaction.getTransactionId());
+                        break;
+                    case FAILED:
+                    case SKIP:
+                    default:
+                        failed++;
+                        break;
                 }
-                transactionMapper.updateById(transaction);
 
             } catch (Exception e) {
+                // ReconciliationProcessor 的 REQUIRES_NEW 事务已回滚，不影响其他记录
                 log.error("对账失败，交易ID：{}", transaction.getTransactionId(), e);
                 failed++;
             }
         }
 
-        // ② 修复：用注入的 snowflake bean 生成 ID
+        // 对账汇总记录使用独立的自动提交（不依赖外层事务）
         PaymentReconciliation rec = buildReconciliation(
             "AUTO_TIMEOUT", timeoutTransactions.size(), matched, mismatch, 0, 0,
             mismatchIds, startTime);
@@ -137,13 +138,14 @@ public class PaymentReconciliationJob {
     /**
      * 每日凌晨3点全量对账
      *
-     * ① @SchedulerLock：只有一个实例运行，防止3倍重复
+     * 修复：同 reconcileTimeoutTransactions，移除 @Transactional，
+     * 每笔通过 ReconciliationProcessor 独立事务处理
      */
     @Scheduled(cron = "${payment.reconciliation.daily-cron:0 0 3 * * ?}")
     @SchedulerLock(name = "dailyFullReconciliation",
                    lockAtMostFor = "PT2H",
                    lockAtLeastFor = "PT10M")
-    @Transactional(rollbackFor = Exception.class)
+    // ⚠️ 不加 @Transactional：每笔记录由 ReconciliationProcessor 独立提交
     public void dailyFullReconciliation() {
         log.info("=== 开始每日全量对账（ShedLock已获取，单实例执行）===");
         Date startTime = new Date();
@@ -166,27 +168,26 @@ public class PaymentReconciliationJob {
                 if (PaymentStatus.TIMEOUT.name().equals(transaction.getPaymentStatus())) timeoutCount++;
                 if (PaymentStatus.PENDING.name().equals(transaction.getPaymentStatus())) pendingCount++;
 
-                if (!isTerminalStatus(transaction.getPaymentStatus())
-                        && transaction.getGatewayTransactionId() != null) {
+                // 终态或无网关ID的跳过
+                if (isTerminalStatus(transaction.getPaymentStatus())
+                        || transaction.getGatewayTransactionId() == null) {
+                    matched++;
+                    continue;
+                }
 
-                    // ④ 修复：多渠道路由
-                    GatewayTransactionStatus gatewayStatus = queryGatewayStatus(transaction);
-                    if (gatewayStatus == null) continue;
+                // ④ 多渠道路由查询
+                GatewayTransactionStatus gatewayStatus = queryGatewayStatus(transaction);
+                if (gatewayStatus == null) continue;
 
-                    if (!transaction.getPaymentStatus().equals(gatewayStatus.getStatus())) {
-                        mismatch++;
-                        mismatchIds.add(transaction.getTransactionId());
-                        transaction.setPreviousStatus(transaction.getPaymentStatus());
-                        transaction.setPaymentStatus(gatewayStatus.getStatus());
-                        transaction.setReconciliationStatus("MISMATCH");
-                        transaction.setReconciliationTime(new Date());
-                        transactionMapper.updateById(transaction);
-                    } else {
-                        matched++;
-                    }
+                // ⑤ 独立事务处理（状态机校验 + 乐观锁写DB）
+                ReconcileResult result = reconciliationProcessor.processOne(transaction, gatewayStatus);
+                if (result == ReconcileResult.MISMATCH) {
+                    mismatch++;
+                    mismatchIds.add(transaction.getTransactionId());
                 } else {
                     matched++;
                 }
+
             } catch (Exception e) {
                 log.error("全量对账失败，交易ID：{}", transaction.getTransactionId(), e);
             }

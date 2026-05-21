@@ -5,6 +5,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import sys.smc.payment.enums.PaymentChannel;
 import sys.smc.payment.exception.GatewayException;
+import sys.smc.payment.exception.ServiceUnavailableException;
 
 import javax.annotation.PostConstruct;
 import java.util.*;
@@ -23,6 +24,16 @@ public class PaymentGatewayRouter {
      */
     @Autowired
     private List<PaymentGateway> gateways;
+
+    /**
+     * 网关健康监控 / 熔断器
+     * 在 selectGateway() 路由新支付请求时进行熔断检查（拦截因渠道故障导致的用户请求）。
+     * getGateway() / getGatewayByCallbackPath() 故意不检查熔断，因为：
+     *   - 回调处理（verifyCallback/parseCallbackData）是本地操作，不发网络请求
+     *   - 对账查询是后台恢复作业，不应被熔断阻断
+     */
+    @Autowired
+    private GatewayHealthMonitor healthMonitor;
 
     /**
      * 渠道 -> 网关映射
@@ -90,50 +101,66 @@ public class PaymentGatewayRouter {
     }
 
     /**
-     * 根据支付方式智能选择网关
+     * 根据支付方式智能选择网关（含熔断检查）
+     *
+     * 熔断逻辑：
+     *   - 遍历时跳过熔断中的渠道（OPEN 状态）
+     *   - 处于半开（HALF_OPEN）的渠道被允许通过一次探测请求
+     *   - 所有可用渠道均熔断时抛 ServiceUnavailableException（HTTP 503）
+     *
      * @param paymentMethod 支付方式（如：CARD, ALIPAY, WECHAT等）
      * @return 最优网关
      */
     public PaymentGateway selectGateway(String paymentMethod) {
-        List<PaymentGateway> availableGateways = new ArrayList<>();
-        
+        List<PaymentGateway> candidates = new ArrayList<>();
+
         for (PaymentGateway gateway : gatewayMap.values()) {
-            if (gateway.isAvailable() && gateway.supportsPaymentMethod(paymentMethod)) {
-                availableGateways.add(gateway);
+            if (!gateway.isAvailable()) continue;
+            if (!gateway.supportsPaymentMethod(paymentMethod)) continue;
+
+            // 熔断检查：HALF_OPEN 时 isCircuitOpen() 内部 CAS 只放行一个线程探测
+            if (healthMonitor.isCircuitOpen(gateway.getChannel())) {
+                log.warn("[路由跳过] 渠道 {} 熔断中，已从候选列表排除（paymentMethod={}）",
+                        gateway.getChannel().getCode(), paymentMethod);
+                continue;
             }
+            candidates.add(gateway);
         }
-        
-        if (availableGateways.isEmpty()) {
-            // 路由失败时输出所有渠道状态，方便排查（哪个渠道没配 API Key 等）
-            StringBuilder diagnosis = new StringBuilder("已注册渠道状态：");
-            gatewayMap.forEach((ch, gw) ->
-                    diagnosis.append(ch.getCode()).append("=").append(gw.isAvailable() ? "可用" : "不可用").append(" "));
-            log.error("没有支持支付方式 [{}] 的可用网关。{}", paymentMethod, diagnosis);
-            throw new GatewayException("没有支持该支付方式的可用网关: " + paymentMethod);
+
+        if (candidates.isEmpty()) {
+            StringBuilder diagnosis = new StringBuilder("各渠道状态：");
+            gatewayMap.forEach((ch, gw) -> diagnosis
+                    .append(ch.getCode()).append("=")
+                    .append(!gw.isAvailable() ? "配置不可用" : healthMonitor.isCircuitOpen(ch) ? "熔断中" : "OK")
+                    .append(" "));
+            log.error("没有支持 [{}] 的可用网关。{}", paymentMethod, diagnosis);
+            throw new ServiceUnavailableException(
+                    "当前支付渠道暂时不可用，请稍后重试（paymentMethod=" + paymentMethod + "）");
         }
-        
-        // 按优先级排序，选择优先级最高的
-        availableGateways.sort(Comparator.comparingInt(PaymentGateway::getPriority));
-        
-        PaymentGateway selected = availableGateways.get(0);
+
+        // 按优先级排序，选优先级最高（数值最小）的
+        candidates.sort(Comparator.comparingInt(PaymentGateway::getPriority));
+        PaymentGateway selected = candidates.get(0);
         log.debug("为支付方式 {} 选择网关: {}", paymentMethod, selected.getChannelName());
-        
         return selected;
     }
 
     /**
-     * 根据支付方式智能选择网关（支持渠道强制覆盖）
+     * 根据支付方式智能选择网关（支持渠道强制覆盖，含熔断检查）
      *
-     * 用途：前端传 channel=SCB 时强制走渣打，不传 channel 则按 paymentMethod 自动路由。
-     *
-     * @param paymentMethod  支付方式（如 VISA / ALIPAY），channelOverride 为 null 时生效
-     * @param channelOverride 渠道代码覆盖（如 "SCB"），非 null 时直接 getGateway(channelOverride)
+     * @param paymentMethod  支付方式，channelOverride 为 null 时生效
+     * @param channelOverride 渠道代码覆盖（如 "SCB"），非 null 时强制走指定渠道
      * @return 对应的网关实例
      */
     public PaymentGateway selectGateway(String paymentMethod, String channelOverride) {
         if (channelOverride != null && !channelOverride.isEmpty()) {
             log.debug("渠道强制覆盖: {}，跳过自动路由", channelOverride);
-            return getGateway(channelOverride);
+            PaymentChannel channel = PaymentChannel.fromCode(channelOverride);
+            if (healthMonitor.isCircuitOpen(channel)) {
+                throw new ServiceUnavailableException(channelOverride,
+                        "支付渠道 " + channel.getName() + " 暂时不可用，请稍后重试");
+            }
+            return getGateway(channel);
         }
         return selectGateway(paymentMethod);
     }
