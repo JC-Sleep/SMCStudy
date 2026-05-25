@@ -1,5 +1,41 @@
 # Plan: 路由中心 + 流程引擎 — 电讯行业适用性分析与实施方案
 
+## ✅ 实施状态总览（2026-05-22 已完成）
+
+| Step | 内容 | 状态 | 文件 | 备注 |
+|------|------|------|------|------|
+| Step 1 | GatewayHealthMonitor（三态熔断） | ✅ 已实现 | `gateway/GatewayHealthMonitor.java` | 修复Plan原稿3处Bug |
+| Step 2 | PaymentGatewayRouter接入熔断检查 | ✅ 已实现 | `gateway/PaymentGatewayRouter.java` | selectGateway含熔断；getGateway/Callback不熔断 |
+| Step 3 | GATEWAY_CIRCUIT_STATUS表（可选） | ⏸ 暂缓 | — | 当前内存熔断已满足需求；跨重启不保持熔断符合电讯场景 |
+| Step 4B | PaymentTransition（转换定义） | ✅ 已实现 | `statemachine/PaymentTransition.java` | |
+| Step 5B | PaymentStateMachine（自研方案B） | ✅ 已实现 | `statemachine/PaymentStateMachine.java` | 13条合法转换，guard，action |
+| Step 6B | TransitionContext（上下文） | ✅ 已实现 | `statemachine/TransitionContext.java` | |
+| Step 7B | 状态机集成至回调服务 | ✅ 已实现 | `PaymentCallbackServiceEnhanced.java` | REQUIRES_NEW + 乐观锁原子保证 |
+| Step 8B | 状态机集成至对账处理器 | ✅ 已实现 | `job/ReconciliationProcessor.java` | Bug-D修复：PENDING分支 |
+| — | OrderSuccessNotificationJob（新增） | ✅ 已实现 | `job/OrderSuccessNotificationJob.java` | 死账消灭防线2，Plan未包含 |
+| — | GlobalExceptionHandler扩展 | ✅ 已实现 | `config/GlobalExceptionHandler.java` | 503(熔断) + 409(非法转换) |
+| — | ShedLock依赖补全 | ✅ 已修复 | `pom.xml` | Plan中漏列，编译缺失 |
+
+### 实施中发现并修复的 Bug（Plan 原稿缺陷）
+
+| Bug ID | 严重度 | 发现位置 | 描述 | 修复方案 |
+|--------|--------|---------|------|---------|
+| **Bug-D** | 🔴 致命 | `ReconciliationProcessor.processOne()` | 对PENDING和TIMEOUT统一走 `localStatus→RECONCILING`，但状态机**未注册** `PENDING→RECONCILING`，永远抛异常，PENDING死账无法自愈 | PENDING走直接修正 `PENDING→SUCCESS/FAILED`；TIMEOUT保持两步路径 |
+| **Bug-E** | 🟡 中危 | `isTerminalStatus()`（两处） | 缺少 `REFUNDING/PARTIALLY_REFUNDED/REFUND_FAILED`，日全量对账对退款中交易发起无效银行查询 | 三个状态加入终态检查 |
+| **Bug-F** | 🟡 低危 | `updateLastQueryTime()` | 遗漏 `setLastQueryTime(new Date())`，LAST_QUERY_TIME字段永不更新 | 补充字段更新 |
+| **Bug-G** | 🔴 高危 | `notifyOrderSystem()` | 空TODO，对账修正SUCCESS后订单系统永远收不到通知，死账 | 实现结构化日志+ORDER_NOTIFIED字段+OrderSuccessNotificationJob兜底 |
+| **Bug-H** | 🟡 中危 | `pom.xml` | ShedLockConfig.java已用但依赖缺失，编译失败 | 新增shedlock-spring + shedlock-provider-redis-spring 4.44.0 |
+
+### 新增（Plan未覆盖）
+
+| 新增内容 | 文件 | 说明 |
+|---------|------|------|
+| `ORDER_NOTIFIED` 字段 | `PaymentTransaction.java` | 追踪订单系统通知状态（0=未通知，1=已通知） |
+| `OrderSuccessNotificationJob` | `job/` | 每5分钟扫描ORDER_NOTIFIED=0的SUCCESS记录，兜底重试通知，消灭死账 |
+| `markOrderNotified()` | `ReconciliationProcessor.java` | 对账修正为SUCCESS后设ORDER_NOTIFIED=0，触发通知链路 |
+
+---
+
 ## 背景
 
 当前系统已实现 SCB/Alipay/CCB/CyberSource 多渠道策略模式路由、退款审批流、对账任务核心骨架。
@@ -139,7 +175,21 @@ paymentMapper.updateById(transaction);  // 没有任何拦截
 
 ## Steps
 
-### Step 1 — 路由中心：故障熔断（GatewayHealthMonitor）
+> ℹ️ 以下各 Step 已于 2026-05-22 全部实施完毕。实际实现与 Plan 原稿有差异的地方用 `⚠️ 实现差异` 标注。
+
+### Step 1 — 路由中心：故障熔断（GatewayHealthMonitor）✅ 已实现
+
+**目标**：电讯不做成本路由，专注故障熔断保障月结日稳定性
+
+**实际文件**：`gateway/GatewayHealthMonitor.java`
+
+⚠️ **实现差异（Plan原稿有3处并发Bug，已在实现时修复）**：
+
+| Bug | Plan 原稿写法 | 实际实现 |
+|-----|------------|---------|
+| `recordSuccess` 重置失效 | `failureCount.getOrDefault(..., new AtomicInteger(0)).set(0)` | `failureCounts.computeIfAbsent(...).set(0)` |
+| 半开竞争（多线程同时探测） | `circuitOpen.put(channel, false)` | `circuitOpenTime.remove(channel, openTime)` — CAS原子操作 |
+| Boolean可见性 | `Map<Channel, Boolean> circuitOpen` | 改用 `Map<Channel, Long> circuitOpenTime`（null=关闭，非null=开启） |
 
 **目标**：电讯不做成本路由，专注故障熔断保障月结日稳定性
 
@@ -190,7 +240,16 @@ public class GatewayHealthMonitor {
 }
 ```
 
-### Step 2 — 路由中心：PaymentGatewayRouter 接入熔断检查
+### Step 2 — 路由中心：PaymentGatewayRouter 接入熔断检查 ✅ 已实现
+
+**实际文件**：`gateway/PaymentGatewayRouter.java`
+
+⚠️ **实现差异**：
+- `selectGateway(paymentMethod)` — 熔断检查，过滤 OPEN 渠道（半开 HALF_OPEN 时放行一次探测）
+- `selectGateway(paymentMethod, channelOverride)` — channelOverride 路径也做熔断检查
+- `getGateway(channel)` / `getGatewayByCallbackPath()` — **故意不检查熔断**，因为：
+  - 回调处理是本地操作（verifyCallback/parseCallbackData不发网络请求）
+  - 对账查询是后台恢复作业，不应被熔断阻断
 
 修改 `PaymentGatewayRouter.java`，在 `selectGateway()` 和 `getGateway()` 中加入熔断判断：
 
@@ -215,9 +274,10 @@ healthMonitor.recordSuccess(channel);
 healthMonitor.recordFailure(channel);
 ```
 
-### Step 3 — 路由中心：新增 GATEWAY_CIRCUIT_STATUS 表（可选持久化）
+### Step 3 — 路由中心：新增 GATEWAY_CIRCUIT_STATUS 表（可选持久化）⏸ 暂缓
 
-如需持久化熔断状态（跨重启保持），新增表：
+> **暂缓原因**：内存熔断已满足电讯月结场景需求。跨重启不保持熔断状态在电讯场景中是合理的（
+> 重启通常是运维介入后操作，渠道问题应已解决）。未来如需持久化，按以下 DDL 实施：
 
 ```sql
 CREATE TABLE GATEWAY_CIRCUIT_STATUS (
@@ -600,7 +660,9 @@ transactionMapper.updateById(transaction);
 
 ---
 
-## ③-B 方案二：自研轻量状态机（极简，团队可完全掌控）
+## ③-B 方案二：自研轻量状态机（极简，团队可完全掌控）✅ 已选用并实现
+
+> **最终选择**：方案B（自研）。10个状态，13条合法转换，零第三方依赖，团队完全掌控。
 
 ### 设计思路
 
@@ -609,9 +671,9 @@ transactionMapper.updateById(transaction);
 
 这是美团、滴滴早期支付系统的做法，后期业务复杂化后再升级到 COLA 或自研框架。
 
-### Step 4B — PaymentTransition（转换定义）
+### Step 4B — PaymentTransition（转换定义）✅ 已实现
 
-新建 `statemachine/PaymentTransition.java`：
+**实际文件**：`statemachine/PaymentTransition.java`
 
 ```java
 package sys.smc.payment.statemachine;
@@ -638,9 +700,11 @@ public class PaymentTransition {
 }
 ```
 
-### Step 5B — PaymentStateMachine（核心状态机，60行）
+### Step 5B — PaymentStateMachine（核心状态机）✅ 已实现
 
-新建 `statemachine/PaymentStateMachine.java`：
+**实际文件**：`statemachine/PaymentStateMachine.java`
+
+⚠️ **实现差异**：实际注册了 **13条** 合法转换（Plan原稿图示11条，补充了 `PARTIALLY_REFUNDED→REFUNDING` 和 `REFUND_FAILED→REFUNDING`）。Guard action 日志更详细，含 operator 和 remark 参数。
 
 ```java
 package sys.smc.payment.statemachine;
@@ -806,7 +870,31 @@ public class PaymentStateMachine {
 }
 ```
 
-### Step 6B — 使用方式（与方案A基本相同）
+### Step 6B — 使用方式（与方案A基本相同）✅ 已实现
+
+**涉及文件**：`PaymentCallbackServiceEnhanced.java`（回调路径）、`ReconciliationProcessor.java`（对账路径）
+
+⚠️ **实现差异（关键 Bug 修复）**：
+
+Plan 原稿的对账使用示例中（Step6B代码），对 PENDING 和 TIMEOUT 统一走两步路径：
+```java
+// ❌ Plan原稿：对所有状态都先走 RECONCILING
+stateMachine.transition(PaymentStatus.valueOf(transaction.getPaymentStatus()), RECONCILING, ctx);
+```
+
+但状态机只注册了 `TIMEOUT→RECONCILING`，`PENDING→RECONCILING` 不存在！  
+**修复（Bug-D）**：PENDING 交易走直接修正，TIMEOUT 保持两步路径：
+
+```java
+// ✅ 实际实现：按 localStatus 分支路由
+if (localEnum == PENDING) {
+    // 回调丢失/延迟场景：PENDING→SUCCESS/FAILED（单步，状态机白名单允许）
+    return reconcilePendingDirect(fresh, localStatus, bankStatus, targetEnum, ctx);
+} else {
+    // 超时场景：TIMEOUT→RECONCILING→SUCCESS/FAILED（两步，必须保留审计踪迹）
+    return reconcileViaReconcilingPath(fresh, localEnum, localStatus, bankStatus, targetEnum, ctx);
+}
+```
 
 ```java
 // 注入状态机
@@ -873,18 +961,28 @@ Spring StateMachine？
 
 ## Further Considerations
 
-1. **熔断后用户体验**：CyberSource 熔断时，信用卡用户应看到"当前信用卡服务繁忙，请稍后重试或使用其他支付方式"。在 `GlobalExceptionHandler` 中将 `ServiceUnavailableException` 转换为友好提示。
+1. **熔断后用户体验**：CyberSource 熔断时，信用卡用户应看到"当前信用卡服务繁忙，请稍后重试或使用其他支付方式"。在 `GlobalExceptionHandler` 中将 `ServiceUnavailableException` 转换为友好提示。✅ **已实现**（HTTP 503）
 
-2. **电讯月结与状态机的关键边界**：批量自动扣费月底并发高，状态机是无状态的不受影响。唯一注意：乐观锁 `version` 字段配合状态机一起使用，确保"校验通过 → 写DB"之间不被其他线程抢占。
+2. **电讯月结与状态机的关键边界**：批量自动扣费月底并发高，状态机是无状态的不受影响。唯一注意：乐观锁 `version` 字段配合状态机一起使用，确保"校验通过 → 写DB"之间不被其他线程抢占。✅ **已实现**（`@Transactional(REQUIRES_NEW)` + `updateById` 乐观锁）
 
-3. **跨境漫游路由优先级**：跨境漫游缴费需自动匹配支持外汇结算的渠道（CyberSource 多货币），此业务路由规则比健康检查优先级更高，在 `selectGateway()` 前置处理，不受熔断影响。
+3. **跨境漫游路由优先级**：跨境漫游缴费需自动匹配支持外汇结算的渠道（CyberSource 多货币），此业务路由规则比健康检查优先级更高，在 `selectGateway()` 前置处理，不受熔断影响。⏸ **待实现**（当前通过 `channelOverride` 手动指定，自动化匹配为下一步）
 
 4. **路由成功率提升目标（98.2% → 99.5%）的实现路径**：
-   - **Phase 1**（健康熔断+告警）：减少单点故障导致的批量失败，预计提升 0.5~0.8%
-   - **Phase 2**（多商户号 MID 切换）：同一 CyberSource 账号申请多个 MID，Chargeback 超阈值时切换，需 EBC 合同申请，预计再提升 0.3~0.5%
+   - **Phase 1**（健康熔断+告警）：减少单点故障导致的批量失败，预计提升 0.5~0.8%。✅ **已实现**
+   - **Phase 2**（多商户号 MID 切换）：同一 CyberSource 账号申请多个 MID，Chargeback 超阈值时切换，需 EBC 合同申请，预计再提升 0.3~0.5%。⏸ **待实现**
 
 5. **状态机的唯一危险**：无论哪个方案，状态机只是"校验层"，**DB 才是状态真相来源**。  
    一定要确保"状态机通过校验 → 数据库更新"是**原子操作**（同一事务，或乐观锁兜底），  
-   否则状态机通过了但 DB 更新失败，会出现"状态机说SUCCEss但DB还是PENDING"的不一致。
+   否则状态机通过了但 DB 更新失败，会出现"状态机说SUCCESS但DB还是PENDING"的不一致。✅ **已实现**（`@Transactional(REQUIRES_NEW)` 包裹 transition() + updateById()）
+
+6. **死账消灭完整链路**（Plan 原稿未覆盖，实施时新增）：
+   - `ORDER_NOTIFIED` 字段：SUCCESS 时写 0，通知成功后写 1
+   - `OrderSuccessNotificationJob`：每5分钟扫描 ORDER_NOTIFIED=0，兜底重试
+   - 两层防线确保订单系统最终感知支付成功，消灭"付了钱收不到货"死账
+   - **DDL 需要执行**：
+     ```sql
+     ALTER TABLE PAYMENT_TRANSACTION ADD ORDER_NOTIFIED NUMBER(1) DEFAULT 0;
+     CREATE INDEX IDX_PTX_ORDER_NOTIFIED ON PAYMENT_TRANSACTION(PAYMENT_STATUS, ORDER_NOTIFIED);
+     ```
 
 
