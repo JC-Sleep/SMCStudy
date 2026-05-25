@@ -1,7 +1,7 @@
 package sys.smc.payment.statemachine;
 
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component;
+// import org.springframework.stereotype.Component;   // ← 已注释：升级到 COLA 方案后不再作为 Spring Bean 注册
 import sys.smc.payment.enums.PaymentStatus;
 import sys.smc.payment.exception.IllegalStateTransitionException;
 
@@ -10,43 +10,41 @@ import java.util.*;
 
 import static sys.smc.payment.enums.PaymentStatus.*;
 
-/**
- * 自研轻量支付状态机（方案B）
- *
- * ─── 设计原则 ────────────────────────────────────────────────────
- *  1. 无状态：此组件不持有任何交易的当前状态，状态真相来源在 DB
- *  2. 白名单机制：只有明确声明的转换才合法，未声明的全部拒绝
- *  3. 线程安全：transitions Map 在 @PostConstruct 后只读，并发安全
- *  4. 原子性保障：状态机本身只做"校验"，DB 写入由调用方在同一事务/乐观锁保护下完成
- *
- * ─── 合法状态迁移白名单 ──────────────────────────────────────────
- *
- *  正常支付流程：
- *    INIT          → PENDING          [SUBMIT]
- *    PENDING       → SUCCESS          [BANK_CONFIRM, guard: 签名有效]
- *    PENDING       → FAILED           [BANK_DECLINE]
- *    PENDING       → TIMEOUT          [SYSTEM_TIMEOUT]
- *
- *  对账修正流程（TIMEOUT 禁止直接→SUCCESS，必须经过 RECONCILING 留审计踪迹）：
- *    TIMEOUT       → RECONCILING      [RECONCILE_START]
- *    RECONCILING   → SUCCESS          [RECON_SUCCESS]
- *    RECONCILING   → FAILED           [RECON_FAIL]
- *
- *  退款流程：
- *    SUCCESS          → REFUNDING     [REFUND_APPLY]
- *    PARTIALLY_REFUNDED → REFUNDING   [REFUND_APPLY]  ← 继续部分退款
- *    REFUND_FAILED    → REFUNDING     [REFUND_APPLY]  ← 退款失败重试
- *    REFUNDING     → REFUNDED         [REFUND_COMPLETE] 全额退款终态
- *    REFUNDING     → PARTIALLY_REFUNDED [PARTIAL_REFUND]
- *    REFUNDING     → REFUND_FAILED    [REFUND_FAIL] 需人工干预
- *
- * ─── 非法转换示例（自动拦截）──────────────────────────────────────
- *    TIMEOUT   → SUCCESS    ❌ 银行迟到回调必须走对账修正，不可绕过
- *    FAILED    → REFUNDED   ❌ 失败的订单不能退款
- *    SUCCESS   → SUCCESS    ❌ 防止重复回调处理
- *    REFUNDED  → REFUNDING  ❌ 已终态不能再退
+/*
+ * ╔══════════════════════════════════════════════════════════════════════════════╗
+ * ║  ⚠️  已停用（方案B → 方案A 升级）                                            ║
+ * ║                                                                              ║
+ * ║  此类为原"自研轻量状态机（方案B）"实现，已升级替换为 COLA StateMachine（方案A）。║
+ * ║  代码保留作为参考和迁移对比，不再作为 Spring Bean 注册（@Component 已注释掉）。 ║
+ * ║                                                                              ║
+ * ║  替换关系：                                                                   ║
+ * ║    旧：@Autowired PaymentStateMachine stateMachine                           ║
+ * ║    新：@Autowired PaymentStateMachineService stateMachineService             ║
+ * ║                                                                              ║
+ * ║  接口对比（完全兼容，方法签名不变）：                                           ║
+ * ║    旧：stateMachine.transition(from, to, ctx)                                ║
+ * ║    新：stateMachineService.transition(from, to, ctx)    ← 签名完全相同        ║
+ * ║                                                                              ║
+ * ║  新文件：                                                                     ║
+ * ║    PaymentEvent.java             — COLA 事件枚举                             ║
+ * ║    PaymentStateMachineConfig.java — COLA @Bean 配置，注册所有合法转换          ║
+ * ║    PaymentStateMachineService.java — 服务封装，对外提供 transition 接口        ║
+ * ║                                                                              ║
+ * ║  升级原因：                                                                   ║
+ * ║    1. COLA DSL 更清晰，可生成 PlantUML 状态图（generatePlantUML()）           ║
+ * ║    2. Alibaba/蚂蚁/钉钉等亿级系统验证，社区活跃                               ║
+ * ║    3. 无状态设计与自研方案相同，无实例管理负担                                  ║
+ * ║    4. 团队扩张后可无缝迁移                                                    ║
+ * ╚══════════════════════════════════════════════════════════════════════════════╝
  */
-@Component
+
+/**
+ * 自研轻量支付状态机（方案B）— 已停用，请使用 PaymentStateMachineService（方案A COLA）
+ *
+ * @deprecated 已升级为 COLA StateMachine（方案A），见 PaymentStateMachineService
+ */
+@Deprecated
+// @Component  // ← 已注释：升级到 COLA 后此 Bean 不再注册，避免与 PaymentStateMachineService 冲突
 @Slf4j
 public class PaymentStateMachine {
 
@@ -220,4 +218,3 @@ public class PaymentStateMachine {
         return ctx.getTransaction().getTransactionId();
     }
 }
-

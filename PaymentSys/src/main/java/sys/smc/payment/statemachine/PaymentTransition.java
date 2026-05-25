@@ -7,14 +7,24 @@ import sys.smc.payment.enums.PaymentStatus;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
-/**
- * 支付状态转换定义
- *
- * 一条转换 = 源状态 + 目标状态 + （可选）guard 条件 + （可选）action 动作
- *
- * guard 为 null → 无条件允许（只要 from→to 在白名单中即可）
- * action 为 null → 无副作用（只做日志）
+/*
+ * ╔══════════════════════════════════════════════════════════════════════════════╗
+ * ║  ⚠️  已停用（方案B → 方案A 升级）                                            ║
+ * ║                                                                              ║
+ * ║  此类是自研状态机（方案B，PaymentStateMachine）使用的"转换定义"数据对象。      ║
+ * ║  升级到 COLA StateMachine（方案A）后，COLA 在内部通过 Builder DSL 管理转换，   ║
+ * ║  无需此外部数据类。                                                            ║
+ * ║                                                                              ║
+ * ║  代码保留作为参考，不再被任何 Spring Bean 引用。                               ║
+ * ╚══════════════════════════════════════════════════════════════════════════════╝
  */
+
+/**
+ * 支付状态转换定义（方案B 自研状态机专用）— 已停用，COLA 内部自管理转换定义
+ *
+ * @deprecated 随 PaymentStateMachine（方案B）一起停用，升级至 COLA StateMachine（方案A）
+ */
+@Deprecated
 @Data
 @Builder
 public class PaymentTransition {
@@ -40,4 +50,3 @@ public class PaymentTransition {
      */
     private Consumer<TransitionContext> action;
 }
-

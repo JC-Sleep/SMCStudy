@@ -40,4 +40,3 @@ public class IllegalStateTransitionException extends RuntimeException {
         return toStatus;
     }
 }
-

@@ -24,7 +24,8 @@ import sys.smc.payment.gateway.PaymentGateway;
 import sys.smc.payment.gateway.PaymentGatewayRouter;
 import sys.smc.payment.mapper.PaymentCallbackLogMapper;
 import sys.smc.payment.mapper.PaymentTransactionMapper;
-import sys.smc.payment.statemachine.PaymentStateMachine;
+// import sys.smc.payment.statemachine.PaymentStateMachine;  // ← 已注释：方案B自研状态机，已升级为 COLA（方案A）
+import sys.smc.payment.statemachine.PaymentStateMachineService; // ← 新增：COLA 状态机服务封装（方案A）
 import sys.smc.payment.statemachine.TransitionContext;
 
 import java.util.Date;
@@ -52,9 +53,13 @@ public class PaymentCallbackServiceEnhanced {
     @Autowired
     private PaymentGatewayRouter gatewayRouter;
 
-    /** 自研轻量状态机：在 DB 写入前校验状态转换合法性 */
+    // /** 自研轻量状态机：在 DB 写入前校验状态转换合法性 */
+    // @Autowired
+    // private PaymentStateMachine stateMachine;  // ← 已注释：方案B，已升级为 COLA（方案A）
+
+    /** COLA 状态机服务：在 DB 写入前校验状态转换合法性（升级自方案B，接口签名不变） */
     @Autowired
-    private PaymentStateMachine stateMachine;
+    private PaymentStateMachineService stateMachineService;
 
     /** 渠道健康监控：回调处理成功/失败后更新熔断计数 */
     @Autowired
@@ -323,7 +328,8 @@ public class PaymentCallbackServiceEnhanced {
 
         // 状态机白名单校验：非法转换抛 IllegalStateTransitionException（如 TIMEOUT→SUCCESS）
         // 此方法在 @Transactional 事务中，校验失败时事务回滚，DB 不会被修改
-        stateMachine.transition(currentStatus, targetStatus, ctx);
+        // stateMachine.transition(currentStatus, targetStatus, ctx);  // ← 已注释：方案B（自研），升级为 COLA（方案A）
+        stateMachineService.transition(currentStatus, targetStatus, ctx); // ← 新：COLA，签名与方案B完全相同
 
         // 校验通过，构建更新对象（必须带 version 字段，触发 MyBatis-Plus 乐观锁 WHERE version=V）
         PaymentTransaction update = new PaymentTransaction();

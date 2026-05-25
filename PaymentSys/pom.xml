@@ -138,6 +138,29 @@
             <artifactId>shedlock-provider-redis-spring</artifactId>
             <version>4.44.0</version>
         </dependency>
+
+        <!--
+         ╔══════════════════════════════════════════════════════════════╗
+         ║  COLA StateMachine — 升级替换自研轻量状态机（方案B → 方案A）  ║
+         ║                                                              ║
+         ║  原自研方案（方案B）：PaymentStateMachine.java               ║
+         ║    - 优点：零依赖、代码可完全掌控                             ║
+         ║    - 缺点：DSL 手写，无 PlantUML 可视化                      ║
+         ║                                                              ║
+         ║  COLA 方案（方案A）：PaymentStateMachineConfig.java          ║
+         ║    + PaymentStateMachineService.java                         ║
+         ║    - 优点：Alibaba/蚂蚁/钉钉亿级系统验证，DSL 清晰            ║
+         ║           无状态（每次传入当前状态，无实例管理问题）           ║
+         ║           支持 PlantUML 生成状态图                           ║
+         ║    - jar 体积：仅 ~100KB，无传递依赖                         ║
+         ║    - Java 8 兼容                                             ║
+         ╚══════════════════════════════════════════════════════════════╝
+        -->
+        <dependency>
+            <groupId>com.alibaba.cola</groupId>
+            <artifactId>cola-component-statemachine</artifactId>
+            <version>4.3.2</version>
+        </dependency>
     </dependencies>
 
     <build>

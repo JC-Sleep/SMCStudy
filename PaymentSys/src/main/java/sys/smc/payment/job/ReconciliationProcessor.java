@@ -11,7 +11,8 @@ import sys.smc.payment.exception.IllegalStateTransitionException;
 import sys.smc.payment.exception.OptimisticLockException;
 import sys.smc.payment.gateway.dto.GatewayTransactionStatus;
 import sys.smc.payment.mapper.PaymentTransactionMapper;
-import sys.smc.payment.statemachine.PaymentStateMachine;
+// import sys.smc.payment.statemachine.PaymentStateMachine;  // ← 已注释：方案B自研状态机，已升级为 COLA（方案A）
+import sys.smc.payment.statemachine.PaymentStateMachineService; // ← 新增：COLA 状态机服务封装（方案A）
 import sys.smc.payment.statemachine.TransitionContext;
 
 import java.util.Date;
@@ -53,8 +54,12 @@ public class ReconciliationProcessor {
     @Autowired
     private PaymentTransactionMapper transactionMapper;
 
+    // @Autowired
+    // private PaymentStateMachine stateMachine;  // ← 已注释：方案B自研状态机，已升级为 COLA（方案A）
+
+    /** COLA 状态机服务（升级自方案B，transition 接口签名不变） */
     @Autowired
-    private PaymentStateMachine stateMachine;
+    private PaymentStateMachineService stateMachine; // ← 变量名保持不变，仅类型改为 PaymentStateMachineService
 
     /**
      * 处理单笔对账（独立事务，REQUIRES_NEW）
@@ -168,7 +173,7 @@ public class ReconciliationProcessor {
 
         if (SUCCESS == targetEnum) {
             markOrderNotified(fresh, upd, false);  // orderNotified=0，等待通知 job 处理
-            log.error("[对账] 🚨 回调丢失！支付已修正为SUCCESS，等待 OrderSuccessNotificationJob 通知订单系统 txn={}",
+            log.error("[对账]  回调丢失！支付已修正为SUCCESS，等待 OrderSuccessNotificationJob 通知订单系统 txn={}",
                     fresh.getTransactionId());
         }
         return ReconcileResult.MISMATCH;
@@ -212,7 +217,7 @@ public class ReconciliationProcessor {
 
         if (SUCCESS == targetEnum) {
             markOrderNotified(fresh, upd2, false); // orderNotified=0，等待通知 job
-            log.error("[对账] 🚨 TIMEOUT修正为SUCCESS！等待 OrderSuccessNotificationJob 通知订单系统 txn={}",
+            log.error("[对账]  TIMEOUT修正为SUCCESS！等待 OrderSuccessNotificationJob 通知订单系统 txn={}",
                     fresh.getTransactionId());
         }
         return ReconcileResult.MISMATCH;

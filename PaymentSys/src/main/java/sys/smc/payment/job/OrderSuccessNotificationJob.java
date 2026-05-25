@@ -115,7 +115,7 @@ public class OrderSuccessNotificationJob {
 
             // ── 当前：结构化告警日志（可被 ELK/Splunk 采集并触发告警）────────────
             // 生产上线前必须替换为 MQ 或 HTTP 调用！
-            log.error("[订单通知] 🚨 PAYMENT_SUCCESS_NEEDS_ORDER_CONFIRM " +
+            log.error("[订单通知]  PAYMENT_SUCCESS_NEEDS_ORDER_CONFIRM " +
                       "orderRef={} txnId={} amount={} currency={} gateway={} successAt={}",
                       txn.getOrderReference(),
                       txn.getTransactionId(),
@@ -143,5 +143,4 @@ public class OrderSuccessNotificationJob {
         }
     }
 }
-
 

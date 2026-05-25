@@ -24,4 +24,3 @@ public class ServiceUnavailableException extends RuntimeException {
         return channelCode;
     }
 }
-

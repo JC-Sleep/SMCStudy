@@ -18,6 +18,7 @@ import sys.smc.payment.entity.PaymentTransaction;
 import sys.smc.payment.enums.PaymentChannel;
 import sys.smc.payment.enums.PaymentStatus;
 import sys.smc.payment.exception.PaymentException;
+import sys.smc.payment.gateway.GatewayHealthMonitor;
 import sys.smc.payment.gateway.PaymentGateway;
 import sys.smc.payment.gateway.PaymentGatewayRouter;
 import sys.smc.payment.gateway.dto.GatewayPaymentResponse;
@@ -44,6 +45,17 @@ public class PaymentServiceEnhanced {
 
     @Autowired
     private PaymentGatewayRouter gatewayRouter;
+
+    /**
+     * Bug-J 修复：注入熔断器，用于支付发起失败时累加失败计数。
+     *
+     * 原来 GatewayHealthMonitor.recordFailure() 只在回调处理失败时被调用（PaymentCallbackServiceEnhanced），
+     * 但 gateway.createPayment() 失败时（网关 5xx/超时）从不调用，导致熔断器无法从"发起失败"触发，
+     * 只能等回调超时才能累计到阈值。月结账单日 CyberSource 宕机时，需要请求继续打到超时才会熔断——
+     * 修复后：第 1 次发起失败就开始计数，连续 3 次即触发熔断，保护剩余请求。
+     */
+    @Autowired
+    private GatewayHealthMonitor healthMonitor;
 
     @Autowired(required = false)
     private RedissonClient redissonClient;
@@ -259,6 +271,13 @@ public class PaymentServiceEnhanced {
         } catch (Exception e) {
             log.error("支付发起失败，订单号：{}，渠道：{}", 
                 request.getOrderReference(), gateway.getChannelName(), e);
+
+            // Bug-J 修复：呼叫熔断器记录失败（网关超时/5xx 等基础设施故障）
+            // 连续 FAILURE_THRESHOLD 次失败后自动触发熔断，后续请求快速失败避免线程堆积
+            // 注意：业务拒绝（如卡被拒 BANK_DECLINE）不应调此方法；但在发起阶段出现异常
+            // 通常代表网关不可用，记录失败是合理的（HALF_OPEN 探测成功会自动重置计数）
+            healthMonitor.recordFailure(gateway.getChannel());
+
             transaction.setPaymentStatus(PaymentStatus.FAILED.name());
             transaction.setErrorMessage(e.getMessage());
             transaction.setStatusUpdateTime(new Date());
@@ -334,6 +353,18 @@ public class PaymentServiceEnhanced {
         return transactionMapper.selectOne(
             new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<PaymentTransaction>()
                 .eq(PaymentTransaction::getTransactionId, transactionId)
+        );
+    }
+
+    /**
+     * 根据订单编号查询交易（供 PaymentController 使用）
+     */
+    public PaymentTransaction queryByOrderReference(String orderReference) {
+        return transactionMapper.selectOne(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<PaymentTransaction>()
+                .eq(PaymentTransaction::getOrderReference, orderReference)
+                .orderByDesc(PaymentTransaction::getCreateTime)
+                .last("FETCH FIRST 1 ROWS ONLY")  // Oracle 语法（MySQL 用 LIMIT 1）
         );
     }
 

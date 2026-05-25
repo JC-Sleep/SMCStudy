@@ -66,8 +66,16 @@ public class PaymentInitRequest implements Serializable {
 
     /**
      * 返回URL（支付完成后跳转）
+     *
+     * Bug-K 修复：原 @NotBlank 只验证非空，未验证协议。
+     * 恶意请求可传 javascript:alert(1) 或 data:text/html,... 作为 returnUrl，
+     * 若下游直接用于重定向则触发 XSS/Open Redirect。
+     * 修复：强制要求 http:// 或 https:// 开头。
      */
     @NotBlank(message = "返回URL不能为空")
+    @javax.validation.constraints.Pattern(
+        regexp = "^https?://.*",
+        message = "返回URL必须是有效的 HTTP/HTTPS 地址")
     private String returnUrl;
 
     /**

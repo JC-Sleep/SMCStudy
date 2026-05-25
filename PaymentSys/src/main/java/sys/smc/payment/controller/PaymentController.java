@@ -10,7 +10,8 @@ import sys.smc.payment.dto.ApiResponse;
 import sys.smc.payment.dto.PaymentInitRequest;
 import sys.smc.payment.dto.PaymentInitResponse;
 import sys.smc.payment.entity.PaymentTransaction;
-import sys.smc.payment.service.PaymentService;
+// import sys.smc.payment.service.PaymentService;  // ← Bug-I 注释：基础版，有 Bug-2(@Transactional包住Redis锁)，已替换
+import sys.smc.payment.service.PaymentServiceEnhanced; // ← Bug-I 修复：增强版，分布式锁+TransactionTemplate正确实现
 
 /**
  * 支付控制器
@@ -21,8 +22,22 @@ import sys.smc.payment.service.PaymentService;
 @Slf4j
 public class PaymentController {
 
+    // @Autowired
+    // private PaymentService paymentService;  // ← Bug-I 已注释：基础版含Bug-2(@Transactional事务边界问题)
+
+    /**
+     * Bug-I 修复：改注入增强版服务
+     *
+     * 原 PaymentService.initiatePayment() 有 @Transactional，导致事务包住了 Redis 锁的整个生命周期：
+     *   T5 线程A：finally unlock() 时事务还未提交 → 线程B拿锁后双重检查看不到A的数据 → 重复创建交易
+     *
+     * PaymentServiceEnhanced.initiatePayment() 修复：
+     *   ① 移除外层 @Transactional
+     *   ② TransactionTemplate.execute() 让事务在 finally unlock() 之前提交
+     *   ③ 数据库 UNIQUE INDEX(IDEMPOTENCY_KEY) 作最终兜底
+     */
     @Autowired
-    private PaymentService paymentService;
+    private PaymentServiceEnhanced paymentService;
 
     @Autowired
     @Qualifier("paymentRateLimiter")
