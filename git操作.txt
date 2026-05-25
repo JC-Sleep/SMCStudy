@@ -90,6 +90,41 @@ git config --global https.proxy 127.0.0.1:76454
 复制这 一行命令 执行：
 git config --global url."https://ghproxy.net/https://github.com".insteadOf https://github.com
 
+
+---------------------------------------------------======访问代理失败
+错误信息显示你的 Git 远程地址被配置成了通过 ghproxy.net 代理访问 GitHub，但该代理目前无法连接。
+
+解决方案
+方案一：直接改回 GitHub 原始地址（推荐）
+
+git remote set-url origin https://github.com/JC-Sleep/SMCStudy.git
+git pull
+
+
+方案二：更换可用的代理
+
+如果你在国内需要代理加速，可以换一个其他镜像：
+
+# 使用 ghfast.top（目前较稳定）
+git remote set-url origin https://ghfast.top/https://github.com/JC-Sleep/SMCStudy.git
+
+# 或者使用 gh-proxy.com
+git remote set-url origin https://gh-proxy.com/https://github.com/JC-Sleep/SMCStudy.git
+方案三：检查并清除全局代理设置
+
+如果是通过 Git 全局配置设置的代理，执行：
+# 查看当前代理设置
+git config --global --list | grep proxy
+
+# 清除 HTTP 代理
+git config --global --unset http.proxy
+git config --global --unset https.proxy
+
+验证当前远程地址
+git remote -v
+
+-------------------------------------====
+
 前这个系统是开发成都，我不知道有没有这个，目前开发情况是看订单处理的最终一致性这个文档，如果有增加功能请添加，完成下面的，顺便也列出下面文档的原来和解决情况，最好是时序图
 kafka处理：Kafka 使用异步处理，削峰填谷，如何保证订单处理的最终一致性？当 Kafka 消息积压时，系统如何应对？异步处理提前给user返回成功吗？还是等 Kafka 处理完成后再返回结果？如果提前返回成功，后续处理失败时需要补偿机制。
 2.如何订单处理的最终一致性
