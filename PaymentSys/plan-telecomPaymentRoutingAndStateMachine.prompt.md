@@ -1,20 +1,382 @@
 # Plan: 路由中心 + 流程引擎 — 电讯行业适用性分析与实施方案
 
-## ✅ 实施状态总览（2026-05-22 已完成）
+---
+
+## 📖 COLA StateMachine 完整使用指南（新手必读）
+
+> 本节面向不了解状态机的读者，从零解释 Guard 概念、COLA 五大核心组件、以及运行时完整时序。  
+> **读完本节，你就能看懂 `PaymentStateMachineConfig.java` 里的每一行。**
+
+---
+
+### 一、什么是 Guard（守卫条件）？
+
+**一句话**：Guard 是"状态转换的门卫"，在执行转换之前先检查一个布尔条件，条件不满足则把门关上，阻止转换发生。
+
+#### 现实比喻
+
+```
+ATM 取款场景：
+
+事件：用户按下"取款"按钮
+当前状态：已插卡
+
+没有 Guard：不管余额多少，直接出钞
+有 Guard：先检查 余额 >= 取款金额 才出钞
+
+Guard = 业务前置条件检查
+```
+
+#### 我们系统里唯一的 Guard
+
+```java
+// PaymentStateMachineConfig.java 第 83 行
+builder.externalTransition()
+    .from(PENDING).to(SUCCESS).on(BANK_CONFIRM)
+    .when(ctx -> ctx.isSignatureValid())   // ← 这就是 Guard！
+    .perform((from, to, event, ctx) -> log.info("支付成功..."));
+```
+
+**解读**：当收到 `BANK_CONFIRM`（银行回调成功）事件时：
+- Guard 通过（`signatureValid = true`）→ 允许 `PENDING → SUCCESS`
+- Guard 失败（`signatureValid = false`）→ **COLA 返回原状态 `PENDING`，拒绝转换**
+
+**为什么需要这个 Guard？**
+
+```
+攻击者伪造一个银行回调，声称"我已扣款成功":
+  没有 Guard：→ 直接把交易标记为 SUCCESS，货物出门，钱没收到  
+  有了 Guard：→ 签名验证失败 → COLA 拒绝转换 → 交易仍是 PENDING → 不发货
+```
+
+#### Guard 在代码中的完整链路
+
+```
+1. PaymentCallbackServiceEnhanced.processCallback()
+      ↓ 先做 gateway.verifyCallback(rawBody, signature) → signatureValid = true/false
+      ↓
+2. 构建 TransitionContext:
+      TransitionContext ctx = TransitionContext.builder()
+          .transaction(transaction)
+          .signatureValid(signatureValid)  // ← 把验签结果放进 context
+          .build();
+      ↓
+3. PaymentStateMachineService.transition(PENDING, SUCCESS, ctx)
+      ↓ 内部调用 COLA: paymentStateMachine.fireEvent(PENDING, BANK_CONFIRM, ctx)
+      ↓
+4. COLA 内部：
+      找到 PENDING + BANK_CONFIRM 的转换定义
+      ↓ 执行 Guard: ctx.isSignatureValid()
+        → true  → 执行 Action（打日志）→ 返回 SUCCESS
+        → false → 不执行 Action → 返回 PENDING（原状态！）
+      ↓
+5. PaymentStateMachineService：
+      result == from (PENDING) → 签名验证失败 → 抛 IllegalStateTransitionException
+      ↓
+6. 调用方捕获异常：
+      回调记录为 ILLEGAL_TRANSITION，返回 HTTP 200 给银行（避免银行无限重试）
+```
+
+---
+
+### 二、COLA 五大核心组件
+
+#### 组件总览
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    COLA StateMachine 架构                         │
+├──────────────┬──────────────────────────────────────────────────┤
+│ 组件          │ 作用                                              │
+├──────────────┼──────────────────────────────────────────────────┤
+│ StateMachine │ 最终成品：无状态单例Bean，接受三个泛型参数<S,E,C>      │
+│              │ 方法：fireEvent(currentState, event, ctx) → newState│
+├──────────────┼──────────────────────────────────────────────────┤
+│ Builder      │ 建造者：启动时一次性注册所有合法转换                   │
+│              │ 从 StateMachineBuilderFactory.create() 获取          │
+├──────────────┼──────────────────────────────────────────────────┤
+│ Event (E)    │ 触发器枚举：什么"事件"能让状态发生变化                 │
+│              │ 对应我们的 PaymentEvent 枚举（11个值）                │
+├──────────────┼──────────────────────────────────────────────────┤
+│ Condition    │ Guard 的接口形式：boolean isSatisfied(C context)     │
+│(Guard)       │ Lambda: ctx -> ctx.isSignatureValid()               │
+├──────────────┼──────────────────────────────────────────────────┤
+│ Action       │ 转换动作：void execute(S from, S to, E event, C ctx) │
+│              │ Lambda: (from, to, event, ctx) -> log.info(...)     │
+└──────────────┴──────────────────────────────────────────────────┘
+```
+
+#### 泛型参数对应关系
+
+```java
+StateMachine < S,              E,           C             >
+             PaymentStatus,  PaymentEvent, TransitionContext
+
+S = State     状态   → PaymentStatus 枚举（INIT/PENDING/SUCCESS...10个值）
+E = Event     事件   → PaymentEvent  枚举（SUBMIT/BANK_CONFIRM...11个值）
+C = Context   上下文 → TransitionContext（自定义：含交易对象/操作人/签名结果）
+```
+
+#### Builder DSL 语法全解
+
+```java
+// ① 单个源状态转换（无Guard）
+builder.externalTransition()
+    .from(PENDING)              // 源状态
+    .to(FAILED)                 // 目标状态
+    .on(BANK_DECLINE)           // 触发事件
+    .perform((from, to, event, ctx) -> log.warn("银行拒绝"));   // Action（可选）
+
+// ② 单个源状态转换（有Guard）
+builder.externalTransition()
+    .from(PENDING)
+    .to(SUCCESS)
+    .on(BANK_CONFIRM)
+    .when(ctx -> ctx.isSignatureValid())  // Guard: 条件不满足→返回原状态
+    .perform((from, to, event, ctx) -> log.info("支付成功"));
+
+// ③ 多个源状态 → 同一目标（fromAmong）
+builder.externalTransitions()           // 注意: externalTransitionS（复数）
+    .fromAmong(SUCCESS, PARTIALLY_REFUNDED, REFUND_FAILED)  // 三个源状态
+    .to(REFUNDING)
+    .on(REFUND_APPLY)
+    .perform((from, to, event, ctx) -> log.info("发起退款，来自{}", from));
+                                        // ↑ from 会是 SUCCESS/PARTIALLY_REFUNDED/REFUND_FAILED 之一
+
+// ④ 无Guard无Action（最简形式）
+builder.externalTransition()
+    .from(PENDING)
+    .to(TIMEOUT)
+    .on(SYSTEM_TIMEOUT);                // 分号结束，没有 .when() 也没有 .perform()
+
+// ⑤ 完成建造，注册进全局 static Map
+StateMachine<PaymentStatus, PaymentEvent, TransitionContext> machine = builder.build("paymentStateMachine");
+```
+
+---
+
+### 三、COLA 运行时序图
+
+> 以下时序图展示4个典型场景下，代码如何一步一步流转。
+
+---
+
+#### 场景A：正常支付回调（PENDING → SUCCESS，签名有效）
+
+```
+银行服务器          PaymentCallbackController   PaymentCallbackServiceEnhanced   PaymentStateMachineService   COLA StateMachine   Oracle DB
+    │                        │                           │                              │                           │               │
+    │──POST /callback/cybr──▶│                           │                             │                           │               │
+    │                        │──processCallback()───────▶│                             │                           │               │
+    │                        │                           │──gateway.verifyCallback()   │                           │               │
+    │                        │                           │   signatureValid = true     │                           │               │
+    │                        │                           │──selectById(gatewayTxnId)──────────────────────────────────────────────▶│
+    │                        │                           │◀──transaction(status=PENDING, version=3)─────────────────────────────── │
+    │                        │                           │                             │                           │               │
+    │                        │                           │  isTerminalStatus? NO ✅    │                           │               │
+    │                        │                           │                             │                           │               │
+    │                        │                           │──transition(PENDING,SUCCESS,ctx{signatureValid=true})──▶│               │
+    │                        │                           │                             │──resolveEvent(PENDING,SUCCESS)             │
+    │                        │                           │                             │  → BANK_CONFIRM           │               │
+    │                        │                           │                             │──fireEvent(PENDING,BANK_CONFIRM,ctx)──────▶│
+    │                        │                           │                             │                           │  checkWhitelist│
+    │                        │                           │                             │                           │  ✅ 定义存在  │
+    │                        │                           │                             │                           │  Guard: ctx.isSignatureValid()=true ✅
+    │                        │                           │                             │                           │  Action: log.info("支付成功...")
+    │                        │                           │                             │◀──return SUCCESS──────────│               │
+    │                        │                           │◀──void(通过)────────────────│                           │               │
+    │                        │                           │                             │                           │               │
+    │                        │                           │──updateById(version=3,status=SUCCESS)──────────────────────────────────▶│
+    │                        │                           │                             │                           │  WHERE version=3→1行更新 ✅
+    │                        │                           │──healthMonitor.recordSuccess│                           │               │
+    │                        │                           │──notifyOrderSystem()        │                           │               │
+    │◀──HTTP 200 "SUCCESS"───│◀──return───────────────── │                             │                           │               │
+```
+
+---
+
+#### 场景B：非法转换被拦截（TIMEOUT → SUCCESS）
+
+```
+                 银行迟到回调（30分钟后才到，交易已超时）
+
+PaymentCallbackServiceEnhanced   PaymentStateMachineService   COLA StateMachine
+         │                                   │                       │
+         │──transition(TIMEOUT,SUCCESS,ctx)─▶│                       │
+         │                                   │──resolveEvent(TIMEOUT,SUCCESS)
+         │                                   │  → BANK_CONFIRM       │
+         │                                   │──fireEvent(TIMEOUT, BANK_CONFIRM, ctx)──▶│
+         │                                   │                       │  查转换表
+         │                                   │                       │  TIMEOUT + BANK_CONFIRM → ❌ 未定义！
+         │                                   │                       │  （只有 TIMEOUT + RECONCILE_START 才合法）
+         │                                   │◀──return TIMEOUT──────│  （返回原状态，不抛异常）
+         │                                   │
+         │                                   │  result == from (TIMEOUT) → 非法转换！
+         │◀──throw IllegalStateTransition─── │
+         │   Exception("TIMEOUT→SUCCESS")
+         │
+         │  catch (IllegalStateTransitionException):
+         │    callbackLog.status = "ILLEGAL_TRANSITION"
+         │    不 re-throw（返回 HTTP 200 给银行，银行不会重试）
+         │    ⚠️ 对账 Job 会在下次对账时通过两步路径修正
+```
+
+---
+
+#### 场景C：Guard 失败（签名无效的伪造回调）
+
+```
+攻击者              PaymentCallbackServiceEnhanced   PaymentStateMachineService   COLA StateMachine
+    │                          │                             │                           │
+    │──POST 伪造回调────────────▶│                            │                           │
+    │                          │──gateway.verifyCallback()  │                           │
+    │                          │   signatureValid = false ❌│                           │
+    │                          │──transition(PENDING,SUCCESS,ctx{signatureValid=false})─▶│
+    │                          │                             │──resolveEvent→BANK_CONFIRM│
+    │                          │                             │──fireEvent(PENDING,BANK_CONFIRM,ctx)──▶│
+    │                          │                             │                           │  checkWhitelist: ✅ 存在
+    │                          │                             │                           │  Guard: ctx.isSignatureValid()
+    │                          │                             │                           │       = false ❌
+    │                          │                             │                           │  Guard 失败 → 不执行Action
+    │                          │                             │◀──return PENDING──────────│  (返回原状态)
+    │                          │                             │
+    │                          │                             │  result(PENDING) == from(PENDING) → Guard 失败！
+    │                          │◀──throw IllegalStateTransitionException("签名验证失败")──│
+    │                          │
+    │                          │  catch: ILLEGAL_TRANSITION，交易仍是 PENDING
+    │◀──HTTP 200───────────────│  （不给攻击者重试信号）
+```
+
+---
+
+#### 场景D：对账两步修正（TIMEOUT → RECONCILING → SUCCESS）
+
+```
+ReconciliationProcessor         PaymentStateMachineService   COLA StateMachine   Oracle DB
+         │                                 │                       │                  │
+         │  @Transactional(REQUIRES_NEW)   │                       │                  │
+         │──selectById(fresh)────────────────────────────────────────────────────────▶│
+         │◀──transaction(status=TIMEOUT, version=5)──────────────────────────────────│
+         │                                 │                       │                  │
+         │  ── Step 1: TIMEOUT → RECONCILING ──                    │                  │
+         │──transition(TIMEOUT,RECONCILING,ctx)────────────────────▶│                 │
+         │                                 │  TIMEOUT+RECONCILE_START → ✅            │
+         │                                 │  Guard: none, Action: log.warn           │
+         │◀──void(ok)──────────────────────│                       │                  │
+         │──updateById(version=5, status=RECONCILING)───────────────────────────────▶│
+         │◀──rows=1, MyBatis自动把version改为6─────────────────────────────────────── │
+         │                                 │                       │                  │
+         │  ── Step 2: RECONCILING → SUCCESS ──                    │                  │
+         │  ctx.transaction.setVersion(6)  │  (使用step1更新后的版本号)               │
+         │──transition(RECONCILING,SUCCESS,ctx)────────────────────▶│                 │
+         │                                 │  RECONCILING+RECON_SUCCESS → ✅          │
+         │                                 │  Guard: none, Action: log.warn("对账修正")│
+         │◀──void(ok)──────────────────────│                       │                  │
+         │──updateById(version=6, status=SUCCESS)────────────────────────────────────▶│
+         │◀──rows=1 ──────────────────────────────────────────────────────────────────│
+         │                                 │                       │                  │
+         │  @Transactional 事务提交 ✅      │                       │                  │
+         │  两步更新原子提交，审计记录完整    │                       │                  │
+```
+
+---
+
+### 四、COLA vs Spring StateMachine — 为什么 COLA 是"无状态"的
+
+#### Spring StateMachine（有状态，不适合支付）
+
+```
+请求1 → StateMachineFactory.getStateMachine("ORDER_001") → 实例A（记住ORDER_001当前在PENDING）
+请求2 → StateMachineFactory.getStateMachine("ORDER_002") → 实例B（记住ORDER_002当前在TIMEOUT）
+
+并发1000笔 = 内存里1000个实例
+重启 = 状态全丢，需要从DB恢复（实现 StateMachinePersist，代码量巨大）
+```
+
+#### COLA StateMachine（无状态，适合支付）
+
+```
+请求1 → COLA fireEvent(PENDING, BANK_CONFIRM, ctx_001) → 返回 SUCCESS
+请求2 → COLA fireEvent(TIMEOUT, RECONCILE_START, ctx_002) → 返回 RECONCILING
+
+整个应用只有 1 个 StateMachine Bean（单例）
+它不知道、也不关心"哪笔交易现在在什么状态"
+状态只存在 DB 里，每次调用时从外部传入
+重启无需恢复，下次请求从 DB 读取最新状态即可
+```
+
+---
+
+### 五、关键要点：为什么"校验通过但DB写失败"不会出现
+
+这是最容易被忽略的并发安全问题：
+
+```
+线程A: stateMachine.transition(PENDING, SUCCESS, ctx)  ← 内存校验通过
+线程B: stateMachine.transition(PENDING, SUCCESS, ctx)  ← 内存校验也通过（几乎同时！）
+
+线程A: updateById(version=3, status=SUCCESS)  → WHERE version=3 → 1行更新，version自动+1变4
+线程B: updateById(version=3, status=SUCCESS)  → WHERE version=3 → 0行！version已经是4了
+
+线程B: rows == 0 → 抛 OptimisticLockException → @Transactional(REQUIRES_NEW) 回滚
+```
+
+**保障机制**：
+1. `@Transactional(REQUIRES_NEW)` — 每笔独立事务，失败不影响其他
+2. MyBatis-Plus `@Version` 乐观锁 — WHERE version=V 的 CAS 原子操作
+3. 即使极端情况下两个线程都通过了 COLA 校验，数据库层面也只有一个会成功
+
+---
+
+### 六、COLA 包结构速查（正确的 import 路径）
+
+```
+com.alibaba.cola.statemachine           ← 根包
+  ├── StateMachine.class                ← import com.alibaba.cola.statemachine.StateMachine
+  ├── StateMachineFactory.class         ← import com.alibaba.cola.statemachine.StateMachineFactory
+  ├── Action.class                      ← import com.alibaba.cola.statemachine.Action  (通常用Lambda，不需要显式导入)
+  ├── Condition.class                   ← import com.alibaba.cola.statemachine.Condition (通常用Lambda)
+  │
+  └── builder/                          ← 子包！Builder 相关类都在这里
+        ├── StateMachineBuilder.class   ← import com.alibaba.cola.statemachine.builder.StateMachineBuilder
+        ├── StateMachineBuilderFactory  ← import com.alibaba.cola.statemachine.builder.StateMachineBuilderFactory
+        ├── ExternalTransitionBuilder   ← builder.externalTransition() 的返回类型
+        ├── ExternalTransitionsBuilder  ← builder.externalTransitions() 的返回类型
+        ├── From / To / On / When       ← 链式调用中间类型（通常隐式使用，不需手动 import）
+        └── ...
+
+⚠️ 常见错误：
+  ❌ import com.alibaba.cola.statemachine.StateMachineBuilder      (根包下没有这个类)
+  ❌ import com.alibaba.cola.statemachine.StateMachineBuilderFactory
+  ✅ import com.alibaba.cola.statemachine.builder.StateMachineBuilder
+  ✅ import com.alibaba.cola.statemachine.builder.StateMachineBuilderFactory
+```
+
+> **📌 说明**：`PaymentStateMachineConfig.java` 之前报 "Cannot resolve symbol StateMachineBuilder" 就是因为用了错误的根包路径。v2.6 已修复为正确的 `builder` 子包。
+
+---
+
+## ✅ 实施状态总览（2026-05-25 最新，含 COLA 升级）
 
 | Step | 内容 | 状态 | 文件 | 备注 |
 |------|------|------|------|------|
 | Step 1 | GatewayHealthMonitor（三态熔断） | ✅ 已实现 | `gateway/GatewayHealthMonitor.java` | 修复Plan原稿3处Bug |
 | Step 2 | PaymentGatewayRouter接入熔断检查 | ✅ 已实现 | `gateway/PaymentGatewayRouter.java` | selectGateway含熔断；getGateway/Callback不熔断 |
 | Step 3 | GATEWAY_CIRCUIT_STATUS表（可选） | ⏸ 暂缓 | — | 当前内存熔断已满足需求；跨重启不保持熔断符合电讯场景 |
-| Step 4B | PaymentTransition（转换定义） | ✅ 已实现 | `statemachine/PaymentTransition.java` | |
-| Step 5B | PaymentStateMachine（自研方案B） | ✅ 已实现 | `statemachine/PaymentStateMachine.java` | 13条合法转换，guard，action |
-| Step 6B | TransitionContext（上下文） | ✅ 已实现 | `statemachine/TransitionContext.java` | |
-| Step 7B | 状态机集成至回调服务 | ✅ 已实现 | `PaymentCallbackServiceEnhanced.java` | REQUIRES_NEW + 乐观锁原子保证 |
-| Step 8B | 状态机集成至对账处理器 | ✅ 已实现 | `job/ReconciliationProcessor.java` | Bug-D修复：PENDING分支 |
+| Step 4B | PaymentTransition（转换定义） | ⚠️ 已停用 | `statemachine/PaymentTransition.java` | 升级COLA后已加 `@Deprecated`，代码保留作参考 |
+| Step 5B | PaymentStateMachine（自研方案B） | ⚠️ 已停用 | `statemachine/PaymentStateMachine.java` | 升级COLA后已注释 `@Component` 和 `@Deprecated` |
+| Step 6B | TransitionContext（上下文） | ✅ 保留使用 | `statemachine/TransitionContext.java` | COLA 方案A 继续使用此上下文类 |
+| **COLA升级** | **PaymentEvent 枚举** | **✅ 新建** | **`statemachine/PaymentEvent.java`** | **11个事件，对应所有合法状态转换** |
+| **COLA升级** | **PaymentStateMachineConfig** | **✅ 新建** | **`statemachine/PaymentStateMachineConfig.java`** | **COLA @Bean，注册13条转换；已修复import子包Bug** |
+| **COLA升级** | **PaymentStateMachineService** | **✅ 新建** | **`statemachine/PaymentStateMachineService.java`** | **transition(from,to,ctx)接口与方案B完全兼容** |
+| Step 7 | 状态机集成至回调服务 | ✅ 已实现 | `PaymentCallbackServiceEnhanced.java` | 改注入 PaymentStateMachineService |
+| Step 8 | 状态机集成至对账处理器 | ✅ 已实现 | `job/ReconciliationProcessor.java` | Bug-D修复：PENDING分支；改注入 PaymentStateMachineService |
 | — | OrderSuccessNotificationJob（新增） | ✅ 已实现 | `job/OrderSuccessNotificationJob.java` | 死账消灭防线2，Plan未包含 |
 | — | GlobalExceptionHandler扩展 | ✅ 已实现 | `config/GlobalExceptionHandler.java` | 503(熔断) + 409(非法转换) |
 | — | ShedLock依赖补全 | ✅ 已修复 | `pom.xml` | Plan中漏列，编译缺失 |
+| **Bug-H** | **PaymentController用错Service** | **✅ 已修复** | **`PaymentController.java`** | **改注入PaymentServiceEnhanced（正确的分布式锁版本）** |
+| **Bug-I** | **熔断recordFailure从不被调用** | **✅ 已修复** | **`PaymentServiceEnhanced.java`** | **发起失败时调healthMonitor.recordFailure()** |
+| **Bug-J** | **returnUrl无HTTP校验** | **✅ 已修复** | **`PaymentInitRequest.java`** | **@Pattern强制https?://前缀** |
 
 ### 实施中发现并修复的 Bug（Plan 原稿缺陷）
 

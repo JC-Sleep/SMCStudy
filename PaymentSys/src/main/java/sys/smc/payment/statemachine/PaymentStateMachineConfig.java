@@ -1,9 +1,9 @@
 package sys.smc.payment.statemachine;
 
 import com.alibaba.cola.statemachine.StateMachine;
-import com.alibaba.cola.statemachine.StateMachineBuilder;
-import com.alibaba.cola.statemachine.StateMachineBuilderFactory;
 import com.alibaba.cola.statemachine.StateMachineFactory;
+import com.alibaba.cola.statemachine.builder.StateMachineBuilder;       // ⚠️ builder 子包，不是根包
+import com.alibaba.cola.statemachine.builder.StateMachineBuilderFactory; // ⚠️ builder 子包，不是根包
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -184,5 +184,6 @@ public class PaymentStateMachineConfig {
         return ctx.getTransaction().getTransactionId();
     }
 }
+
 
 
