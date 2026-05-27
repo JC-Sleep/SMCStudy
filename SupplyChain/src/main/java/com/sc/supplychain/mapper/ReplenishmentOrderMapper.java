@@ -1,0 +1,9 @@
+package com.sc.supplychain.mapper;
+
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.sc.supplychain.entity.ReplenishmentOrder;
+import org.apache.ibatis.annotations.Mapper;
+
+@Mapper
+public interface ReplenishmentOrderMapper extends BaseMapper<ReplenishmentOrder> {}
+
