@@ -39,4 +39,3 @@ public class InventoryEventMessage implements Serializable {
         return new InventoryEventMessage("CONFIRM", skuId, warehouseId, qty, orderNo, System.currentTimeMillis());
     }
 }
-

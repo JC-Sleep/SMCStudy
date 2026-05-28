@@ -13,4 +13,3 @@ public interface ReplenishmentRuleMapper extends BaseMapper<ReplenishmentRule> {
     @Select("SELECT * FROM sc_replenishment_rule WHERE is_enabled = 1")
     List<ReplenishmentRule> selectAllEnabled();
 }
-

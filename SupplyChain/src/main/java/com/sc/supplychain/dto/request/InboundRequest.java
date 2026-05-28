@@ -26,4 +26,3 @@ public class InboundRequest {
 
     private LocalDate expireDate;
 }
-

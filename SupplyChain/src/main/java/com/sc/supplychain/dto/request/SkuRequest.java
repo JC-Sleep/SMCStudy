@@ -29,4 +29,3 @@ public class SkuRequest {
 
     private String imgUrl;
 }
-

@@ -24,4 +24,3 @@ public class Rider implements Serializable {
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
 }
-

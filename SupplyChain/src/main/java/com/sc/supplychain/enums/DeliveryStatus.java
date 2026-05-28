@@ -17,4 +17,3 @@ public enum DeliveryStatus {
 
     DeliveryStatus(String code, String desc) { this.code = code; this.desc = desc; }
 }
-

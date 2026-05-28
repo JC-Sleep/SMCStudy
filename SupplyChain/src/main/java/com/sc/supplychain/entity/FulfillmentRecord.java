@@ -26,4 +26,3 @@ public class FulfillmentRecord implements Serializable {
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
 }
-

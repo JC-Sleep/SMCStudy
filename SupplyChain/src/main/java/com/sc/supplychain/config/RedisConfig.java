@@ -55,4 +55,3 @@ public class RedisConfig {
         return script;
     }
 }
-

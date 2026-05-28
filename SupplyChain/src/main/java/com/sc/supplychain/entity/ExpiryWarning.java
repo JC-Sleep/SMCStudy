@@ -32,4 +32,3 @@ public class ExpiryWarning implements Serializable {
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime warnTime;
 }
-

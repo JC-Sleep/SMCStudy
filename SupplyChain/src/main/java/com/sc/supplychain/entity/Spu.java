@@ -46,4 +46,3 @@ public class Spu implements Serializable {
     @TableLogic
     private Integer deleted;
 }
-

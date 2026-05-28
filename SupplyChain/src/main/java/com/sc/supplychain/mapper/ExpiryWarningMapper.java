@@ -22,4 +22,3 @@ public interface ExpiryWarningMapper extends BaseMapper<ExpiryWarning> {
             "ORDER BY b.expire_date ASC")
     List<com.sc.supplychain.entity.InventoryBatch> selectNearExpiryBatches(@Param("warnDaysNear") int warnDaysNear);
 }
-

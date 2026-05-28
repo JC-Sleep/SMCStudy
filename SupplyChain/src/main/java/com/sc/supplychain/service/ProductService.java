@@ -36,4 +36,3 @@ public interface ProductService {
     /** 禁用/启用 SKU */
     void toggleSkuStatus(Long skuId, boolean enable);
 }
-

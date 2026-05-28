@@ -53,4 +53,3 @@ public class KafkaConfig {
         return TopicBuilder.name(TOPIC_EXPIRY_WARNING).partitions(3).replicas(1).build();
     }
 }
-

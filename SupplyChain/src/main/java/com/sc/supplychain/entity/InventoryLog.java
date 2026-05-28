@@ -37,4 +37,3 @@ public class InventoryLog implements Serializable {
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
 }
-

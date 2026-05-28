@@ -31,4 +31,3 @@ public class RedisKeyUtil {
 
     public static final String EXPIRY_WARN_SET = PREFIX + "expiry:warn:set";
 }
-

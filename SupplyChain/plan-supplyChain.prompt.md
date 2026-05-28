@@ -554,7 +554,33 @@ PENDING → ASSIGNED（派单）→ PICKING（取货中）→ IN_TRANSIT（配�
 
 
 
+## 自己写的，记录
+✅ 执行完成 — 旺生活 O2O 供应链中台
+文件统计：74 个 Java 文件 + 3 个资源文件 + 1 个 pom.xml
 
+### 📦 模块结构
+
+| 包/目录                                                                                                                                                                                                         |   内容 |
+|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------|
+| config/                                                                                                                                                                                                      |RedisConfig（Lua脚本注册）、KafkaConfig（7个Topic+DLT）、MybatisPlusConfig、MetaObjectFillHandler、SupplyChainProperties、SwaggerConfig |
+| entity/                                                                                                                                                                                                      | 16个实体：Spu、Sku、SpuCategory、Warehouse、Inventory、InventoryBatch、InventoryLog、ReplenishmentRule、ReplenishmentOrder、Store、FulfillmentOrder、FulfillmentRecord、ExpiryWarning + Phase2: Rider、DeliveryOrder、KingdeeSync |
+| enums/| 7个枚举：ProductStatus、FreshType、BatchStatus（四级效期）、FulfillmentOrderStatus、InventoryOpType、ReplenishmentStatus、DeliveryStatus                                                                                        |
+| mapper/                                                                                                                                                                                                      | 15个 Mapper（含 InventoryMapper 自定义 lockQty/unlockQty/confirmDeductQty、InventoryBatchMapper FIFO查询、ExpiryWarningMapper 临期扫描）                                                                                       |
+| service/                                                                                                                                                                                                     | 4个服务：ProductService（上下架状态机）、InventoryService（Lua预扣+FIFO+对账）、ReplenishmentService（阈值扫描）、FulfillmentService（全链路履约）                                                                                               |
+| controller/                                                                                                                                                                                                  | 6个接口：Product、Inventory、Replenishment、Fulfillment（含效期预警）、Delivery（Phase2外壳）、Kingdee（Phase2外壳）                                                                                                                  |
+| mq/                                                                                                                                                                                                          | InventoryEventProducer（deduct/restore/confirm/replenishment）                                                                                                                                                  |
+| listener/                                                                                                                                                                                                    | InventoryListener（DEDUCT/RESTORE/CONFIRM落库+DLT告警）、ReplenishmentListener（生成补货单）                                                                                                                                  |
+| job/                                                                                                                                                                                                         | ReplenishmentCheckJob（每30分钟）、ExpiryWarningJob（每天早8点四级预警）、InventoryReconcileJob（每天凌晨2点对账）、KingdeeDataSyncJob（Phase2外壳）                                                                                           |
+| integration/                                                                                                                                                                                                 | KingdeeApiClient（Phase2外壳，3种凭证方法）                                                                                                                                                                              |
+| exception/                                                                                                                                                                                                   | SupplyChainException（stockInsufficient/notFound/illegalStatus）、GlobalExceptionHandler                                                                                                                          |
+| util/                                                                                                                                                                                                        | RedisKeyUtil（所有Redis Key常量）   |                                                                                                                                                                                  |
+| resources                                                                                                                                                                                                    | application.yml（MySQL 8/Redis/Kafka/供应链配置）、lua/inventory_lock.lua（防超卖Lua）、db/init.sql（全量MySQL8 DDL + 测试数据） |                                                                                                     |
+### 🔑 核心技术实现
+防超卖：inventory_lock.lua Lua Script 原子检查+DECRBY，返回 -1（不足）/ -2（未预热）/ ≥0（成功）
+FIFO出库：InventoryBatchMapper.selectFifoBatches() + allocateFifo() 跨批次分配
+异步落库：预扣成功后 Kafka → InventoryListener 消费更新DB，失败重试3次→DLT
+定时对账：凌晨2点全量扫描 Redis vs DB，以DB为准修复，写对账流水
+效期四级：ExpiryWarningJob 每日8点扫描，NORMAL/NEAR_EXPIRY/URGENT/EXPIRED 分级处理
 
 
 

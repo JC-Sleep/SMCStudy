@@ -64,4 +64,3 @@ public class SupplyChainProperties {
     public Kingdee getKingdee() { return kingdee; }
     public void setKingdee(Kingdee k) { this.kingdee = k; }
 }
-

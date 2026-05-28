@@ -19,4 +19,3 @@ public class ReplenishmentRuleRequest {
 
     private Long supplierId;
 }
-

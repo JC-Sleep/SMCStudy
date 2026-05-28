@@ -45,4 +45,3 @@ public interface InventoryMapper extends BaseMapper<Inventory> {
                @Param("warehouseId") Long warehouseId,
                @Param("qty") int qty);
 }
-

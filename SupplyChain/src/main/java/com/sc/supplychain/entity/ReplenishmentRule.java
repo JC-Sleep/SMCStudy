@@ -35,4 +35,3 @@ public class ReplenishmentRule implements Serializable {
     @TableField(fill = FieldFill.INSERT_UPDATE)
     private LocalDateTime updateTime;
 }
-

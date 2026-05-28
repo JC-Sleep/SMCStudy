@@ -139,4 +139,3 @@ supply-chain:
     app-id: ${KINGDEE_APP_ID:}
     app-secret: ${KINGDEE_APP_SECRET:}
     timeout: 10000
-

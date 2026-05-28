@@ -34,4 +34,3 @@ public class ReplenishmentOrder implements Serializable {
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
 }
-

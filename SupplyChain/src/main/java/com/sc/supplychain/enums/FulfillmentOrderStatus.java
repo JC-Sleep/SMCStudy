@@ -18,4 +18,3 @@ public enum FulfillmentOrderStatus {
 
     FulfillmentOrderStatus(String code, String desc) { this.code = code; this.desc = desc; }
 }
-

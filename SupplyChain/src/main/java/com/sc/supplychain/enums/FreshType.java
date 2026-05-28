@@ -15,4 +15,3 @@ public enum FreshType {
 
     FreshType(String code, String desc) { this.code = code; this.desc = desc; }
 }
-

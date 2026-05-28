@@ -29,4 +29,3 @@ public interface InventoryBatchMapper extends BaseMapper<InventoryBatch> {
             "WHERE id = #{id} AND remain_qty >= #{qty}")
     int deductBatchRemain(@Param("id") Long id, @Param("qty") int qty);
 }
-

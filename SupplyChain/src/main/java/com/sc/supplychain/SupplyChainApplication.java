@@ -35,4 +35,3 @@ public class SupplyChainApplication {
         System.out.println("╚═══════════════════════════════════════════════════╝");
     }
 }
-

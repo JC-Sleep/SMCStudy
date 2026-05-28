@@ -35,4 +35,3 @@ public class DeliveryOrder implements Serializable {
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
 }
-

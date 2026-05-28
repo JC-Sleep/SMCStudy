@@ -29,4 +29,3 @@ public class SupplyChainException extends RuntimeException {
         return new SupplyChainException(4002, "状态不合法: " + msg);
     }
 }
-

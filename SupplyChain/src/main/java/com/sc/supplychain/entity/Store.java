@@ -31,4 +31,3 @@ public class Store implements Serializable {
     @TableLogic
     private Integer deleted;
 }
-

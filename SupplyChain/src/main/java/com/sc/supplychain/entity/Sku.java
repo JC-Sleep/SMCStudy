@@ -49,4 +49,3 @@ public class Sku implements Serializable {
     @TableLogic
     private Integer deleted;
 }
-

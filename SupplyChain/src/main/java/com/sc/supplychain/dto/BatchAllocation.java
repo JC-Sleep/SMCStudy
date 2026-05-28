@@ -14,4 +14,3 @@ public class BatchAllocation {
     private String batchNo;
     private int allocateQty;
 }
-

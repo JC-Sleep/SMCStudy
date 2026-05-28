@@ -44,4 +44,3 @@ public class FulfillmentOrder implements Serializable {
     @TableField(fill = FieldFill.INSERT_UPDATE)
     private LocalDateTime updateTime;
 }
-

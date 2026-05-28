@@ -19,4 +19,3 @@ public class ReplenishmentMessage implements Serializable {
     private int replenishQty;
     private long timestamp;
 }
-

@@ -24,4 +24,3 @@ public enum ProductStatus {
         throw new IllegalArgumentException("Unknown ProductStatus: " + code);
     }
 }
-

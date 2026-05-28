@@ -29,4 +29,3 @@ public class OrderCreateRequest {
     /** 默认仓库ID（可选，不传则用主仓） */
     private Long warehouseId;
 }
-

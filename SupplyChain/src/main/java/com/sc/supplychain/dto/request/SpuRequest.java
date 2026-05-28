@@ -20,4 +20,3 @@ public class SpuRequest {
 
     private String description;
 }
-
