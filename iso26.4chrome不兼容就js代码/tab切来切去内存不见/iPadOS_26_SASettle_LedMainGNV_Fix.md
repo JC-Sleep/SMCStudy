@@ -137,6 +137,155 @@ JS 内存数据全没（但 HttpSession 还在 → 刷新后能正常请求服�
 
 ---
 
+## 2.6 为什么 iPad **Safari** 没事，**Chrome** 却崩？同一个 WebKit 不科学？
+
+完全科学。**JS 与渲染层确实是同一个 WebKit**（苹果强制 iOS/iPadOS 所有浏览器使用系统 WKWebView；iOS 17.4 EU DMA 例外只对欧盟 + iPhone，香港 / iPad / 全球绝大多数用户的 Chrome 仍是 WKWebView）。
+**但"用 WKWebView" ≠ "等于 Safari"** —— 它们跑在两套截然不同的**容器 / 特权 / 进程模型**里。
+
+### 2.6.1 容器对比
+
+| 维度 | iPad Safari | iPad Chrome（第三方 WKWebView App） |
+|---|---|---|
+| 进程架构 | **系统级 Safari 服务**，每个 Tab 独立 WebContent Process（带 site isolation） | **普通第三方 App**，所有 Tab 共享一个 `WKProcessPool` |
+| WebContent Process 优先级 | 系统给较高优先级，后台被 Jetsam 杀概率低 | 与普通 App 同档，**进后台即成 Jetsam 第一候选** |
+| 后台时 App 整体是否会被杀 | Safari 是系统组件，几乎不被整体回收 | Chrome App 本身会被冻结/回收，**连带它所有 WebContent 一起没** |
+| 单 Tab 内存限制 | 宽松，OOM 时单 Tab 重启 | 第三方 WKWebView 限制更严，**触顶直接 terminate WebContent** |
+| Process Pool 共享 | 各 Tab 独立 | 同 App 内所有 `WKWebView` 共享 → 一个 Tab 吃爆，**其它 Tab 一起遭殃** |
+| BFCache | 完整启用 | WKWebView 上长期阉割（条件更严、容量更小） |
+| 渲染崩溃后 UI | Safari 自家错误页，**自动尝试重载** | WKWebView 默认 = 空白 + "无法打开这个页面"，**不会自愈** |
+| 跨窗口 opener 跨进程通讯 | 同 process pool 容错好 | 第三方 App 的跨 Tab Window 代理在 IPC 路径上更脆 |
+| JIT | 满血 JavaScriptCore JIT | iOS 17.4 前**第三方 App 没 JIT 权限**；17.4 后 BrowserEngineKit 给了，Chrome 没全用。**老代码循环慢 → unload 异常窗口更长 → 更易触发崩溃路径** |
+
+### 2.6.2 套到本案例
+
+我们的故障三件套要崩需要两个前提：
+
+- **(A) 父进程内存优先级低到能被 Jetsam 选中**
+- **(B) 子页 `unload` 阶段恰好抛跨进程异常**
+
+**Safari**：
+- (A) 难满足 —— 系统级高优先级，长期后台也不容易被杀；即便杀了，Safari 自动重载。
+- (B) 即便发生 —— 各 Tab process pool 独立，子页异常**不会反噬其它 Tab**。
+- 表现：**几乎看不到崩溃**，最多偶尔慢/闪一下。
+
+**Chrome on iPad**：
+- (A) 太容易 —— Chrome App 被切走即降优先级；所有 Tab 共享 `WKProcessPool`，`childWins[]` + opener 让父子内存合并计账；第三方 App Jetsam 阈值更严。
+- (B) 一旦发生 —— 共享 process pool 让子页 `unload` 的 SecurityError 沿 opener 链冲到父页；WKWebView 收到 `webViewWebContentProcessDidTerminate:`，Chrome iOS 壳**没有 Safari 那种自动重载兜底**，直接展示"无法打开这个页面"。
+- 表现：**频繁崩溃 + 不会自愈**，用户必须手动刷新。
+
+→ **这就是"同一个内核，不同表现"的科学解释 —— 内核相同，但运行时上下文 (runtime context) 完全不同。**
+
+### 2.6.3 一个常被忽略的差异：Chrome 的 "Tab" ≠ Safari 的 "Tab"
+
+- Safari Tab = 一个系统级独立 WebContent Process（与 Safari UI 进程分离）。
+- Chrome iOS Tab = Chrome App 内的一个 `WKWebView` 实例。**所有 Tab 都挂在 Chrome 这一个 App 进程下面**。
+
+| 场景 | Safari | Chrome on iPad |
+|---|---|---|
+| 切到别的 App | Safari 后台运行，各 Tab 进程**独立活着** | Chrome App 整体被冻结，**整套 WebContent 一起冻** |
+| 内存紧张 Jetsam | 优先杀最闲的单个 WebContent | 容易**整个 Chrome + 所有 Tab 一锅端** |
+| 切回来 | 各 Tab 状态多半还在 | 醒过来时常发现自己某个 WebContent 没了 → 错误页 |
+
+### 2.6.4 类比
+
+> Safari 像航空公司自家飞行员，享有空管优先调度。
+> Chrome on iPad 像私人飞机，**用着同一架飞机（WebKit）**，但走普通跑道、油量限制更严、塔台优先级最低，遇拥堵第一个被拒绝起飞。
+> 飞机本身没坏，你坐的那架先趴窝。
+
+### 2.6.5 实际可观察的旁证
+
+- 同样动作 Chrome (iPad) 必崩，**Safari 上重现 → 不崩** ✅（本案已验证）。
+- 同一台 iPad，Chrome 上多开几个其它 Tab 后再操作，**崩得更快**（共享 process pool 验证）。
+- iPad 越接近内存上限（视频会议、PDF 阅读器并存），Chrome 越快崩，Safari 仍稳。
+
+### 2.6.6 那为什么 26.3 的 Chrome 也没事，26.4 / 26.5 才出事？
+
+WebKit 在 26.4 / 26.5 的两个改动方向（官方 Release Notes 可查）：
+
+1. **`window.open()` 创建路径重写** —— 26.4 条目 **143901129**："a fresh tab configuration"。第三方 WKWebView 在 opener 链跨进程引用的失效检测变严。
+2. **后台 Tab 生命周期处理收紧** —— 26.4 条目 **164514685**："causing Safari to pause video when leaving a tab"。推断同期对第三方 WKWebView 的 Jetsam 计账也变严。
+
+→ 对 Safari 影响小（它本来就高优先级），对 Chrome 影响大（它本来就低优先级）。
+**同样的代码瑕疵，先在弱势容器里爆发。**
+
+### 2.6.7 一句话总结
+
+> **"同一个内核，不同的容器和优先级。"**
+> Safari = 系统级飞行员、独立 Tab 进程、自动重载兜底；
+> Chrome on iPad = 普通 App、所有 Tab 共享 process pool、Jetsam 第一候选、且崩了不自愈。
+> 我们的三件套（opener / `childWins[]` / `<body onunload>`）在 Safari 那种宽松容器能蒙混，但在 Chrome 这种紧绷容器被精准引爆。
+> **Bug 在我们代码里，Chrome 只是把它放大到肉眼可见的那只放大镜。**
+
+---
+
+## 2.7 疑惑澄清：时间线 —— 26.4 究竟改了什么？"WKProcessPool 共享"是 26.4 才有的吗？
+
+**不是。** 这条很容易让人误会，所以单独拎出来用两条独立时间线讲清楚。
+
+### 2.7.1 时间线 A：**"第三方 App 用 WKWebView + 共享 WKProcessPool"** 是 **2014 年就这样了，跟 26.4 无关**
+
+| 年份 | iOS / iPadOS | 事件 |
+|---|---|---|
+| 2014 | iOS 8 | 苹果发布 **WKWebView** 取代 UIWebView；App Store 规则：**所有第三方浏览器必须用 WKWebView**，不许带自家引擎 |
+| 2015+ | iOS 9+ | Chrome、Edge、Firefox on iOS、Brave 等第三方浏览器全部切到 WKWebView |
+| 2017 | iOS 11 | iPad 多任务 / Split View 大改，**第三方浏览器 App 后台被 Jetsam 杀的概率上升**（社区开始有抱怨） |
+| 2024.3 | iOS 17.4 | **EU DMA 法案**生效，**仅欧盟 + 仅 iPhone** 允许替代引擎（BrowserEngineKit）；iPad、非欧盟地区**不在范围内** → 香港的 iPad Chrome **仍然是 WKWebView** |
+| 至今 | iPadOS 26.5 | **iPad Chrome 依然是 WKWebView**，依然受 `WKProcessPool` 共享 + 第三方 App Jetsam 优先级低的约束 |
+
+**结论 A**：
+- "Chrome on iPad 用 WKWebView" → **2014 年起就这样**。
+- "同 App 内所有 Tab 共享一个 `WKProcessPool`" → **2014 年起就这样**。
+- "第三方 App 的 WebContent 优先级比 Safari 低" → **2014 年起就这样**。
+- → **这些是先天条件，不是 26.4 新加的。**
+
+### 2.7.2 时间线 B：**26.4 / 26.5 改的是"执行得多严"，不是"架构本身"**
+
+| 年份 | 版本 | 改了什么（官方 Release Notes 可查） | 对本 Bug 的影响 |
+|---|---|---|---|
+| 2025.9 | iOS 26.0 | WebKit 大版本号迁到 26（与 macOS / iPadOS 对齐） | 无明显影响 |
+| 2025.12 | iOS 26.2 | 常规修复 | 无明显影响 |
+| 2026.2 | iOS 26.3 | 常规修复 | **现场反馈：26.3 (1a) 还是好的** ✅ |
+| **2026.3** | **iOS 26.4** | • 条目 **143901129**：`window.open()` 创建路径重写 ("a fresh tab configuration")<br>• 条目 **164514685**：离开 Tab 时 `HTMLMediaElement` / 后台 Tab 生命周期处理调整<br>• 条目 **161370795**：WKWebView 相关修复 | **开始出问题**：opener 链跨进程引用失效检测变严 |
+| **2026.5** | **iOS 26.5** | • 条目 **172247569**：连接（资源句柄）**会"永久坏掉直到刷新"** ← 与现象一模一样<br>• 条目 **174561577**：BFCache 恢复异常修复（反映 WebKit 对 BFCache 行为的持续调整） | **更明显**：父进程崩了不自愈 |
+
+**结论 B**：
+- 26.4 **不是把架构改了**，而是把**对 opener / 跨进程 Window 代理 / `window.open` 的内部状态机收紧了**。
+- 26.5 **进一步放大效应**（"资源句柄永久坏掉"是 26.5 官方承认的现象类别）。
+
+### 2.7.3 两条时间线的"乘法关系" —— 三者必须同时成立才会爆
+
+```
+先天条件（2014~至今，一直在）：
+   ├─ Chrome on iPad = 第三方 WKWebView
+   ├─ 同 App 所有 Tab 共享 WKProcessPool
+   └─ 第三方 App 的 WebContent 被 Jetsam 优先杀
+                    ×
+扳机（2026.3 / iOS 26.4 起新增）：
+   ├─ window.open / opener 跨进程检测变严
+   └─ 后台 Tab 生命周期处理变严
+                    ×
+我们代码的瑕疵（25 年前就这样，一直在）：
+   ├─ window.open 默认带 opener
+   ├─ childWins[] 永不清理
+   └─ <body onunload> 内裸 .close()
+                    ║
+                    ▼
+              **26.4 起爆雷**
+```
+
+**三者必须同时成立才会出问题。** 这就是为什么：
+- 同样代码 → **Safari 不爆**（先天条件不同：Safari 不是第三方 App，独享系统级 WebContent）。
+- 同样代码 → **Chrome on iPad 26.3 不爆**（扳机还没扣下）。
+- 同样代码 → **Chrome on iPad 26.4+ 爆**（三者齐备）。
+
+### 2.7.4 一句话总结
+
+> **"第三方 App 所有 Tab 共享 `WKProcessPool`、第三方 WebContent 被 Jetsam 优先杀" —— 这是 iOS 8（2014）就定下的架构，不是 26.4 才有的。**
+> **26.4 / 26.5 改的是另外一件事**：对 `window.open()` opener 链、跨进程 Window 代理、后台 Tab 生命周期的**严格度**（官方条目 143901129、164514685、172247569 可查）。
+> 这套 **"先天弱势容器" × "26.4 起的严格化" × "我们 25 年前的写法"** 三者相乘，才在 26.4 之后开始爆雷。
+
+---
+
 ## 3. 可被官方文档引用的依据
 
 > ⚠ 必须区分 **"官方 Release Notes 原文"** 与 **"业界标准/推断"**。
