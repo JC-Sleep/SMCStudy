@@ -16,6 +16,8 @@ public class MetaObjectFillHandler implements MetaObjectHandler {
     public void insertFill(MetaObject metaObject) {
         this.strictInsertFill(metaObject, "createTime", LocalDateTime.class, LocalDateTime.now());
         this.strictInsertFill(metaObject, "updateTime", LocalDateTime.class, LocalDateTime.now());
+        // ExpiryWarning uses warnTime instead of createTime
+        this.strictInsertFill(metaObject, "warnTime",   LocalDateTime.class, LocalDateTime.now());
     }
 
     @Override

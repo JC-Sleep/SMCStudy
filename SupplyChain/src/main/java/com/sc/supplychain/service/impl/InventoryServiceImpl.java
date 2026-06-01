@@ -22,6 +22,7 @@ import com.sc.supplychain.util.RedisKeyUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -40,6 +41,8 @@ public class InventoryServiceImpl implements InventoryService {
     private final InventoryBatchMapper batchMapper;
     private final InventoryLogMapper logMapper;
     private final RedisTemplate<String, Object> redisTemplate;
+    /** Use StringRedisTemplate for all numeric Redis ops so Lua tonumber() works on plain integers */
+    private final StringRedisTemplate stringRedisTemplate;
     private final DefaultRedisScript<Long> inventoryLockScript;
     private final InventoryEventProducer eventProducer;
     private final SupplyChainProperties properties;
@@ -80,11 +83,19 @@ public class InventoryServiceImpl implements InventoryService {
             throw SupplyChainException.of("入库更新DB库存失败 skuId=" + skuId);
         }
 
-        // 4. Redis INCRBY + ZSet 添加批次（FIFO score = inboundTime millis）
+        // 4. Sync Redis: always set to exact DB value after inbound for correctness
+        //    Use stringRedisTemplate so value is stored as plain integer string "100"
+        //    (NOT Jackson-serialized ["java.lang.Long",100] which breaks Lua tonumber())
         String redisKey = RedisKeyUtil.inventoryAvailable(warehouseId, skuId);
-        redisTemplate.opsForValue().increment(redisKey, qty);
-        double score = System.currentTimeMillis();
-        redisTemplate.opsForZSet().add(RedisKeyUtil.inventoryBatchZSet(warehouseId, skuId), batchNo, score);
+        Inventory freshInv = getInventory(warehouseId, skuId);
+        if (freshInv != null) {
+            stringRedisTemplate.opsForValue().set(redisKey, String.valueOf(freshInv.getAvailableQty()));
+        }
+        // ZSet records batch FIFO order (score = inboundTime millis, member = batchNo)
+        double score = batch.getInboundTime()
+                .atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+        stringRedisTemplate.opsForZSet().add(
+                RedisKeyUtil.inventoryBatchZSet(warehouseId, skuId), batchNo, score);
 
         // 5. 写流水
         writeLog(skuId, warehouseId, batchNo, InventoryOpType.INBOUND, before, before + qty, qty, batchNo);
@@ -96,17 +107,34 @@ public class InventoryServiceImpl implements InventoryService {
     @Override
     public long lockStock(Long warehouseId, Long skuId, int qty, String orderNo) {
         String key = RedisKeyUtil.inventoryAvailable(warehouseId, skuId);
-        Long result = redisTemplate.execute(
+        // Execute via stringRedisTemplate: keys/args serialized as plain strings
+        // Lua KEYS[1] = "sc:inventory:available:1:1001", ARGV[1] = "2"
+        // tonumber("2") = 2  ← works correctly
+        Long result = stringRedisTemplate.execute(
                 inventoryLockScript,
                 Collections.singletonList(key),
-                (long) qty);
+                String.valueOf(qty));
+
+        if (result == null || result == -2L) {
+            // -2: key not in Redis (cache miss / never warmed up)
+            // Warm up from DB and retry ONCE
+            log.info("[lockStock] Cache miss for skuId={} warehouseId={}, warming up...", skuId, warehouseId);
+            warmupRedisStock(warehouseId, skuId);
+            result = stringRedisTemplate.execute(
+                    inventoryLockScript,
+                    Collections.singletonList(key),
+                    String.valueOf(qty));
+        }
+
         if (result == null || result < 0) {
-            log.warn("[预扣失败] 库存不足 skuId={} warehouseId={} qty={}", skuId, warehouseId, qty);
+            // -1: insufficient stock  /  still -2 after warmup: no inventory record at all
+            log.warn("[lockStock] Insufficient stock skuId={} warehouseId={} qty={}", skuId, warehouseId, qty);
             throw SupplyChainException.stockInsufficient(skuId);
         }
-        // 异步落库：Kafka sc.inventory.deduct
+
+        // result >= 0: remaining stock after deduction — send async Kafka for DB sync
         eventProducer.sendDeduct(InventoryEventMessage.deduct(skuId, warehouseId, qty, orderNo));
-        log.info("[预扣] skuId={} qty={} 剩余={} orderNo={}", skuId, qty, result, orderNo);
+        log.info("[lockStock] OK skuId={} qty={} remaining={} orderNo={}", skuId, qty, result, orderNo);
         return result;
     }
 
@@ -115,10 +143,10 @@ public class InventoryServiceImpl implements InventoryService {
     @Override
     public void unlockStock(Long warehouseId, Long skuId, int qty, String orderNo) {
         String key = RedisKeyUtil.inventoryAvailable(warehouseId, skuId);
-        redisTemplate.opsForValue().increment(key, qty);
-        // 异步落库
+        // Use INCRBY (plain integer) so value stays as parseable string for Lua
+        stringRedisTemplate.opsForValue().increment(key, (long) qty);
         eventProducer.sendRestore(InventoryEventMessage.restore(skuId, warehouseId, qty, orderNo));
-        log.info("[释放预扣] skuId={} qty={} orderNo={}", skuId, qty, orderNo);
+        log.info("[unlockStock] skuId={} qty={} orderNo={}", skuId, qty, orderNo);
     }
 
     // ── 出库确认（FIFO 批次分配） ────────────────────────────────────
@@ -174,20 +202,29 @@ public class InventoryServiceImpl implements InventoryService {
 
     @Override
     public long getAvailableFromRedis(Long warehouseId, Long skuId) {
-        Object val = redisTemplate.opsForValue().get(RedisKeyUtil.inventoryAvailable(warehouseId, skuId));
+        // stringRedisTemplate returns plain String, no Jackson wrapping
+        String val = stringRedisTemplate.opsForValue()
+                .get(RedisKeyUtil.inventoryAvailable(warehouseId, skuId));
         if (val == null) return 0L;
-        return Long.parseLong(val.toString());
+        try {
+            return Long.parseLong(val);
+        } catch (NumberFormatException e) {
+            log.warn("[getAvailableFromRedis] Unexpected Redis value '{}' for skuId={}", val, skuId);
+            return 0L;
+        }
     }
-
-    // ── Redis 预热 ────────────────────────────────────────────────────
 
     @Override
     public void warmupRedisStock(Long warehouseId, Long skuId) {
         Inventory inv = getInventory(warehouseId, skuId);
-        if (inv == null) return;
+        if (inv == null) {
+            log.warn("[warmup] No inventory record for skuId={} warehouseId={}", skuId, warehouseId);
+            return;
+        }
         String key = RedisKeyUtil.inventoryAvailable(warehouseId, skuId);
-        redisTemplate.opsForValue().set(key, (long) inv.getAvailableQty());
-        log.info("[预热] Redis库存 skuId={} warehouseId={} qty={}", skuId, warehouseId, inv.getAvailableQty());
+        // Store as plain integer string so Lua tonumber() works correctly
+        stringRedisTemplate.opsForValue().set(key, String.valueOf(inv.getAvailableQty()));
+        log.info("[warmup] Redis key={} set to {}", key, inv.getAvailableQty());
     }
 
     // ── 定时对账 ────────────────────────────────────────────────────
@@ -196,23 +233,26 @@ public class InventoryServiceImpl implements InventoryService {
     public void reconcile() {
         List<Inventory> allInv = inventoryMapper.selectList(null);
         int diffThreshold = properties.getReconcile().getDiffThreshold();
+        int fixedCount = 0;
         for (Inventory inv : allInv) {
             long redisQty = getAvailableFromRedis(inv.getWarehouseId(), inv.getSkuId());
             long dbQty = inv.getAvailableQty();
             long diff = Math.abs(redisQty - dbQty);
             if (diff > diffThreshold) {
-                log.warn("[对账差异] skuId={} warehouseId={} Redis={} DB={} diff={}",
+                log.warn("[reconcile] DIFF skuId={} warehouseId={} Redis={} DB={} diff={}",
                         inv.getSkuId(), inv.getWarehouseId(), redisQty, dbQty, diff);
-                // 以 DB 为准修复 Redis
+                // DB is source of truth — fix Redis (store as plain integer string)
                 String key = RedisKeyUtil.inventoryAvailable(inv.getWarehouseId(), inv.getSkuId());
-                redisTemplate.opsForValue().set(key, dbQty);
-                redisTemplate.opsForSet().add(RedisKeyUtil.RECONCILE_DIFF_SET,
+                stringRedisTemplate.opsForValue().set(key, String.valueOf(dbQty));
+                stringRedisTemplate.opsForSet().add(RedisKeyUtil.RECONCILE_DIFF_SET,
                         inv.getWarehouseId() + ":" + inv.getSkuId());
                 writeLog(inv.getSkuId(), inv.getWarehouseId(), null,
                         InventoryOpType.RECONCILE_FIX,
                         (int) redisQty, (int) dbQty, (int)(dbQty - redisQty), "RECONCILE");
+                fixedCount++;
             }
         }
+        log.info("[reconcile] Done: total={} fixed={}", allInv.size(), fixedCount);
     }
 
     // ── 私有工具 ────────────────────────────────────────────────────

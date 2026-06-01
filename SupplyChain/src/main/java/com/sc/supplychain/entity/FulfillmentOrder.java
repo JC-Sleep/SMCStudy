@@ -23,6 +23,9 @@ public class FulfillmentOrder implements Serializable {
 
     private Long storeId;
 
+    /** Which warehouse this order is fulfilled from */
+    private Long warehouseId;
+
     private Long skuId;
 
     private Integer qty;

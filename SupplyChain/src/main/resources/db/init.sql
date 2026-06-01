@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS sc_fulfillment_order (
     id           BIGINT        NOT NULL PRIMARY KEY,
     order_no     VARCHAR(64)   NOT NULL UNIQUE,
     store_id     BIGINT,
+    warehouse_id BIGINT        COMMENT '履约仓库ID',
     sku_id       BIGINT,
     qty          INT,
     status       VARCHAR(20)   NOT NULL DEFAULT 'PENDING'

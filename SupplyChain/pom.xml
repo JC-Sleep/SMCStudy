@@ -69,12 +69,26 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
-        <!-- Redisson 分布式锁 -->
+        <!-- Lettuce connection pool (required when spring.redis.lettuce.pool is configured) -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+        </dependency>
+
+        <!-- Jackson Java 8 Date/Time support (used in RedisConfig for LocalDateTime) -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
+
+        <!-- Redisson 分布式锁 (Phase 2 — 暂未启用，先注释避免无密码Redis的AUTH问题) -->
+        <!--
         <dependency>
             <groupId>org.redisson</groupId>
             <artifactId>redisson-spring-boot-starter</artifactId>
             <version>${redisson.version}</version>
         </dependency>
+        -->
 
         <!-- Kafka -->
         <dependency>
@@ -123,11 +137,13 @@
             <artifactId>caffeine</artifactId>
         </dependency>
 
-        <!-- Knife4j / Swagger API 文档 -->
+        <!-- Knife4j OpenAPI3 (基于 SpringDoc，兼容 Spring Boot 2.6.x) -->
+        <!-- Knife4j UI: http://localhost:8091/doc.html -->
+        <!-- Swagger UI: http://localhost:8091/swagger-ui/index.html -->
         <dependency>
             <groupId>com.github.xiaoymin</groupId>
-            <artifactId>knife4j-spring-boot-starter</artifactId>
-            <version>${knife4j.version}</version>
+            <artifactId>knife4j-openapi3-spring-boot-starter</artifactId>
+            <version>4.4.0</version>
         </dependency>
 
         <!-- OkHttp (金蝶云接口 Phase2 预留) -->

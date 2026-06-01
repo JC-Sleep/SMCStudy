@@ -1,0 +1,22 @@
+环境： window ， nodejs>18 
+
+使用node安装claude CLI：
+C:\Users\jczhang>npm install -g @anthropic-ai/claude-code
+
+added 2 packages in 6s
+npm notice
+npm notice New major version of npm available! 10.8.2 -> 11.16.0
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.16.0
+npm notice To update run: npm install -g npm@11.16.0
+npm notice
+
+
+问题一：由于政策访问不了anthropic公司，所以切换使用github copilot
+
+运行以下命令，切换到 GitHub Copilot 模式：
+claude config set claudeCodeUsesCopilot true
+
+然后启动claude
+claude
+
+问题2： 执行问题一切换Github Copilot模式失败，由于laude Code 启动时先检查网络，导致命令无法执行，需要直接修改配置文件，绕过网络检查。

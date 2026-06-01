@@ -44,6 +44,7 @@ public class FulfillmentServiceImpl implements FulfillmentService {
         FulfillmentOrder order = new FulfillmentOrder();
         order.setOrderNo(orderNo);
         order.setStoreId(req.getStoreId());
+        order.setWarehouseId(warehouseId);   // persist so cancel/outbound use same warehouse
         order.setSkuId(req.getSkuId());
         order.setQty(req.getQty());
         order.setStatus(FulfillmentOrderStatus.PENDING.getCode());
@@ -65,8 +66,9 @@ public class FulfillmentServiceImpl implements FulfillmentService {
             FulfillmentOrderStatus.CANCELLED.getCode().equals(order.getStatus())) {
             throw SupplyChainException.illegalStatus("已完成/已取消的订单不能再取消");
         }
-        // 释放预扣
-        inventoryService.unlockStock(DEFAULT_WAREHOUSE_ID, order.getSkuId(), order.getQty(), orderNo);
+        // 释放预扣 — use the warehouse recorded on the order (not hardcoded constant)
+        Long whId = order.getWarehouseId() != null ? order.getWarehouseId() : DEFAULT_WAREHOUSE_ID;
+        inventoryService.unlockStock(whId, order.getSkuId(), order.getQty(), orderNo);
         order.setStatus(FulfillmentOrderStatus.CANCELLED.getCode());
         orderMapper.updateById(order);
         writeRecord(order.getId(), "CANCEL", "system", "订单取消，库存归还");
@@ -93,8 +95,9 @@ public class FulfillmentServiceImpl implements FulfillmentService {
         if (!FulfillmentOrderStatus.PAID.getCode().equals(order.getStatus())) {
             throw SupplyChainException.illegalStatus("只有 PAID 订单才能出库");
         }
-        // FIFO 分配批次 + 出库确认
-        inventoryService.confirmDeduct(DEFAULT_WAREHOUSE_ID, order.getSkuId(), order.getQty(), orderNo);
+        // FIFO 分配批次 + 出库确认 — use order's warehouse
+        Long whId = order.getWarehouseId() != null ? order.getWarehouseId() : DEFAULT_WAREHOUSE_ID;
+        inventoryService.confirmDeduct(whId, order.getSkuId(), order.getQty(), orderNo);
         order.setStatus(FulfillmentOrderStatus.OUTBOUND.getCode());
         orderMapper.updateById(order);
         writeRecord(order.getId(), "OUTBOUND", "system", "FIFO出库确认");
