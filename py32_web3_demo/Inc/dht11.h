@@ -27,5 +27,7 @@ typedef struct {
 
 void         DHT11_Init(void);
 DHT11_Status DHT11_Read(DHT11_Data_t *data);
+uint8_t      DHT11_TestIdleLevel(void);   /* 返回 0~10，期望 10（持续高电平） */
+void         DHT11_SampleWaveform(uint8_t start_ms, char buf[101]);  /* 抓 1ms 波形 */
 
 #endif /* __DHT11_H */

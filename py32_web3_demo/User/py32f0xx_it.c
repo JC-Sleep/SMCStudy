@@ -4,7 +4,7 @@
  * 所有 ISR 都在这里集中管理，便于查找和调试。
  */
 #include "main.h"
-#include "tuya_port.h"
+#include "wifi.h"    /* 涂鸦官方 SDK：声明 uart_receive_input() */
 
 extern UART_HandleTypeDef huart1;
 
@@ -44,7 +44,7 @@ void USART1_IRQHandler(void)
     if (READ_BIT(USART1->SR, USART_SR_RXNE))
     {
         uint8_t byte = (uint8_t)(USART1->DR & 0xFFU);
-        TuyaPort_FeedByte(byte);   /* 存入环形缓冲区，主循环里处理 */
+        uart_receive_input(byte);   /* 存入 SDK 环形缓冲区，主循环里 wifi_uart_service() 消费 */
     }
 
     /* 清除溢出错误（ORE）——如果处理不及时导致溢出，读 SR 再读 DR 即可清除

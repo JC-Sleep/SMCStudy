@@ -17,7 +17,7 @@
  * 修改 py32f0xx_hal_msp.c 中的 gpio.Alternate 值。
  */
 #define TUYA_UART_INSTANCE    USART1
-#define TUYA_UART_BAUD        115200U
+#define TUYA_UART_BAUD        9600U    /* WBR3 出厂默认波特率 9600 */
 
 extern UART_HandleTypeDef huart1;
 
