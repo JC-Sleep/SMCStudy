@@ -19,6 +19,10 @@
 11. [Docker 图形界面操作指南（Docker Desktop）](#11-docker-图形界面操作指南docker-desktop)
 12. [常见问题 FAQ](#12-常见问题-faq)
 13. [报错了？如何查看日志定位问题](#13-报错了如何查看日志定位问题)
+14. [Bug 修复历史记录](#14-bug-修复历史记录)
+15. [版本升级记录](#15-版本升级记录)
+16. [重要注意事项](#16-重要注意事项)
+17. [未完成的功能（TODO）](#17-未完成的功能todo)
 
 ---
 
@@ -1087,7 +1091,367 @@ if (Test-Path $logFile) {
 
 ---
 
-*文档版本: v1.1 | 2026-05-29 | 碧桂园旺生活 O2O 供应链中台*
+*文档版本: v1.2 | 2026-06-01 | 碧桂园旺生活 O2O 供应链中台*
 
+---
 
+## 14. Bug 修复历史记录
 
+> 按时间顺序记录所有发现的 Bug 和修复方式，方便回溯和面试时讲清楚排查思路。
+
+---
+
+### Bug #1 ⚠️ Redis Lua 脚本 `tonumber()` 解析失败
+
+**现象**：入库成功、下单接口报"库存不足"，Redis 里明明有库存。
+
+**根本原因**：  
+使用 `RedisTemplate<String, Object>` 配合 Jackson 序列化，往 Redis 写数值时会变成：
+```
+["java.lang.Long", 100]
+```
+Lua 脚本里 `tonumber(redis.call('GET', key))` 解析这个字符串返回 `nil`，扣减逻辑直接走了"库存不足"分支。
+
+**修复**：把所有数值型 Redis 操作全部改用 `StringRedisTemplate`，存的是纯字符串 `"100"`，Lua 能正常解析。
+
+```java
+// 修复前（错误）
+redisTemplate.opsForValue().set(key, qty);  // 存入 ["java.lang.Long",100]
+
+// 修复后（正确）
+stringRedisTemplate.opsForValue().set(key, String.valueOf(qty));  // 存入 "100"
+```
+
+**影响文件**：`InventoryServiceImpl.java`、`RedisConfig.java`
+
+---
+
+### Bug #2 ⚠️ 缓存穿透导致下单失败（-2 返回值处理错误）
+
+**现象**：Redis 缓存没有预热时，第一次下单直接报"库存不足"，即使 DB 里有库存。
+
+**根本原因**：  
+Lua 脚本约定返回 `-2` 表示"Key 不存在（缓存未预热）"，但代码里把 `-2` 和 `-1`（真正库存不足）一起处理，没有触发缓存预热重试。
+
+**修复**：显式判断 `-2`，触发从 DB 预热 Redis，然后重试一次 Lua 扣减。
+
+```java
+Long result = stringRedisTemplate.execute(inventoryLockScript, keys, args);
+if (result == null || result == -2L) {
+    warmupRedisStock(warehouseId, skuId);  // 从DB读取写入Redis
+    result = stringRedisTemplate.execute(inventoryLockScript, keys, args); // 重试
+}
+if (result == null || result < 0) throw SupplyChainException.stockInsufficient(skuId);
+```
+
+**影响文件**：`InventoryServiceImpl.java`、`inventory_lock.lua`
+
+---
+
+### Bug #3 ⚠️ 履约订单缺少仓库ID字段，取消/出库逻辑用错仓库
+
+**现象**：调用取消订单或出库接口，找不到对应仓库的库存记录，报空指针或操作错仓。
+
+**根本原因**：  
+`FulfillmentOrder` 实体类没有 `warehouseId` 字段，取消/出库时代码用的是硬编码的 `DEFAULT_WAREHOUSE_ID=1`，多仓场景直接出错。
+
+**修复**：
+1. `FulfillmentOrder` 实体加 `private Long warehouseId;`
+2. `init.sql` 的 `sc_fulfillment_order` 表加 `warehouse_id` 列
+3. 下单时保存 `warehouseId`，取消/出库时用 `order.getWarehouseId()`
+
+**影响文件**：`FulfillmentOrder.java`、`FulfillmentServiceImpl.java`、`db/init.sql`
+
+---
+
+### Bug #4 ⚠️ 效期预警自动填充时间为 null
+
+**现象**：效期预警记录保存后，`warn_time` 字段为 null，导致预警时间查询出错。
+
+**根本原因**：  
+`MetaObjectFillHandler`（MyBatis-Plus 自动填充）只填充了 `createTime`/`updateTime`，漏掉了 `warnTime`。
+
+**修复**：在 `insertFill()` 里补充 `warnTime` 的填充逻辑。
+
+```java
+@Override
+public void insertFill(MetaObject metaObject) {
+    this.strictInsertFill(metaObject, "createTime", LocalDateTime.class, LocalDateTime.now());
+    this.strictInsertFill(metaObject, "warnTime", LocalDateTime.class, LocalDateTime.now()); // 补充
+}
+```
+
+**影响文件**：`MetaObjectFillHandler.java`
+
+---
+
+### Bug #5 ⚠️ JDBC URL 编码参数错误，连接 MySQL 报错
+
+**现象**：Spring Boot 启动时报 `Unsupported character encoding 'utf8mb4'`，无法连接数据库。
+
+**根本原因**：  
+`application.yml` 里写了 `characterEncoding=utf8mb4`，这是 MySQL 的字符集名称，不是 Java 的字符集名称，JDBC 驱动不认识。
+
+**修复**：改为 Java 标准字符集名称 `UTF-8`。
+
+```yaml
+# 修复前
+url: ...?characterEncoding=utf8mb4&...
+
+# 修复后
+url: ...?characterEncoding=UTF-8&...
+```
+
+**影响文件**：`application.yml`
+
+---
+
+### Bug #6 ⚠️ Redisson 无密码 Redis 报 AUTH 错误
+
+**现象**：Spring Boot 启动时报 `ERR AUTH <password> called without any password configured`，应用无法启动。
+
+**根本原因**：  
+`pom.xml` 引入了 `redisson-spring-boot-starter`，它在 Spring Boot 启动时自动连接 Redis 并发送 `AUTH ""` 命令，但本地 Redis 没有设置密码，拒绝了这个命令。
+
+**修复**：注释掉 `redisson-spring-boot-starter` 依赖（项目代码实际上没有用到 Redisson，是预留的 Phase 2 依赖）。
+
+```xml
+<!-- 暂未启用，先注释避免无密码Redis的AUTH问题 -->
+<!--
+<dependency>
+    <groupId>org.redisson</groupId>
+    <artifactId>redisson-spring-boot-starter</artifactId>
+    <version>3.17.7</version>
+</dependency>
+-->
+```
+
+**影响文件**：`pom.xml`
+
+---
+
+### Bug #7 ⚠️ Springfox 3.0.0 + Spring Boot 2.6.x NPE 崩溃
+
+**现象**：Spring Boot 启动时报 `NullPointerException at WebMvcPatternsRequestConditionWrapper.getPatterns:56`，应用崩溃。
+
+**根本原因**：  
+Spring Boot 2.6.x 默认路径匹配策略改成了 `PathPatternParser`，而 Springfox 3.0.0 / Knife4j 3.x 内部写死使用 `AntPathMatcher`，两者不兼容。
+
+**修复（最终方案）**：放弃 Springfox，改用 SpringDoc OpenAPI（`springdoc-openapi-ui:1.7.0`），后续再升级到 Knife4j 4.x。
+
+**影响文件**：`pom.xml`、`SwaggerConfig.java`
+
+---
+
+### Bug #8 ⚠️ application.yml 有重复的 `logging:` key，YAML 解析崩溃
+
+**现象**：Spring Boot（Docker 容器）启动时报：
+```
+DuplicateKeyException: found duplicate key logging in 'reader', line 131, column 1
+```
+
+**根本原因**：  
+在修改日志配置时，新增了一个 `logging:` 块，但原文件已经有一个 `logging:` 块了，YAML 不允许同层重复 key。
+
+**修复**：将两个 `logging:` 块合并为一个，保留全部配置项。
+
+**影响文件**：`application.yml`
+
+---
+
+### Bug #9 ⚠️ Docker 容器内 DB_PORT 默认值错误导致连接失败
+
+**现象**：Spring Boot 在 Docker 容器内启动时，连接 MySQL 报 `Connection refused: mysql:3307`。
+
+**根本原因**：  
+`application.yml` 里 `DB_PORT` 的默认值写的是 `3307`（宿主机映射端口），但容器内连接的是 Docker 网络内的 `mysql` 服务，其端口是 `3306`（容器内部端口）。
+
+**修复**：把默认值改为 `3306`，宿主机本地启动时通过环境变量 `DB_PORT=3306`（本机MySQL）传入。
+
+```yaml
+# 修复前
+url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3307}/...
+
+# 修复后
+url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/...
+```
+
+**影响文件**：`application.yml`
+
+---
+
+## 15. 版本升级记录
+
+### v1.0 → v1.1（2026-05-29）
+
+#### 🔄 Swagger / API 文档框架替换
+
+| 项目 | 旧版本 | 新版本 | 原因 |
+|------|--------|--------|------|
+| API 文档框架 | Knife4j 3.0.3（基于 Springfox）| Knife4j 4.4.0（基于 SpringDoc）| Spring Boot 2.6.x NPE 兼容问题 |
+| 依赖包 | `knife4j-spring-boot-starter:3.0.3` | `knife4j-openapi3-spring-boot-starter:4.4.0` | 同上 |
+| Swagger 注解 | `@Api` / `@ApiOperation`（Swagger 2）| `@Tag` / `@Operation`（OpenAPI 3）| Knife4j 4.x 不再支持旧注解 |
+
+**升级后访问地址变化**：
+
+| | 旧地址 | 新地址 |
+|-|--------|--------|
+| 推荐 UI | `/doc.html`（Knife4j 风格）| `/doc.html` ✅（Knife4j 4.x 保留）|
+| Swagger UI | `/swagger-ui.html` | `/swagger-ui/index.html` |
+
+#### 🔄 Docker 架构升级
+
+| 项目 | 旧方式 | 新方式 | 原因 |
+|------|--------|--------|------|
+| Spring Boot 运行 | 本地 `mvn spring-boot:run` | Docker 容器 `sc-app` | 全部中间件+应用都在 Docker，环境统一 |
+| Dockerfile | 多阶段构建（Docker 内跑 Maven）| 单阶段构建（复制本地 JAR）| 多阶段首次构建要下载 Maven 依赖，慢10分钟 |
+| `supply-chain-app` 服务 | 需要 `--profile app` 才启动 | 默认随 `docker-compose up` 启动 | 简化操作 |
+
+#### 🔄 日志配置升级
+
+| 项目 | 旧配置 | 新配置 |
+|------|--------|--------|
+| 日志文件 | 无文件输出 | 自动写入 `app.log` |
+| 业务代码级别 | `INFO` | `DEBUG`（方便排查问题）|
+| Kafka 框架日志 | `INFO` | `WARN`（减少噪音）|
+
+---
+
+## 16. 重要注意事项
+
+> 踩过坑的地方，一定要记住！
+
+---
+
+### ⚠️ 注意事项 1：修改代码后必须重新打 JAR
+
+**原因**：Docker 容器运行的是 `target/SupplyChain-1.0.0.jar`，代码修改后 JAR 不会自动更新。
+
+**操作流程**：
+```powershell
+# 第一步：重新打包（每次改代码都要做）
+$mvn = "C:\WorkSoftware\Idea\IntelliJ IDEA 2025.3.1\plugins\maven\lib\maven3\bin\mvn.cmd"
+$env:JAVA_HOME = "C:\Program Files\Java\jdk1.8.0_321"
+cd C:\WorkSoftware\a_program\selft\smartoneCloud\SupplyChain
+& $mvn clean package -DskipTests -q
+
+# 第二步：重建镜像并重启容器（加 --build 才会用新 JAR）
+docker-compose --progress plain up -d --build supply-chain-app
+```
+
+---
+
+### ⚠️ 注意事项 2：不能同时跑本地 Spring Boot 和 Docker 容器（端口冲突）
+
+**原因**：本地 `mvn spring-boot:run` 和 `sc-app` 容器都占用 `8091` 端口，二选一。
+
+```powershell
+# 查看谁占用了 8091
+netstat -ano | findstr ":8091"
+
+# 停掉本地 java 进程（PID 替换为实际值）
+Stop-Process -Id <PID> -Force
+```
+
+---
+
+### ⚠️ 注意事项 3：端口映射容易搞混
+
+| 服务 | Docker 容器内端口 | 宿主机映射端口 | 谁连哪个 |
+|------|-----------------|--------------|---------|
+| MySQL | 3306 | 3307 | 容器内 Spring Boot → `mysql:3306`；外部工具（Navicat）→ `localhost:3307` |
+| Redis | 6379 | 6380 | 容器内 Spring Boot → `redis:6379`；外部 redis-cli → `localhost:6380` |
+| Kafka | 9092 | 9092 | 容器内 Spring Boot → `kafka:29092`；外部工具 → `localhost:9092` |
+| Spring Boot | 8091 | 8091 | 浏览器 → `localhost:8091` |
+
+---
+
+### ⚠️ 注意事项 4：YAML 不允许重复的 Key
+
+**原因**：`application.yml` 是 YAML 格式，同一层级不能有两个相同的 Key（如两个 `logging:`），否则 Spring Boot 启动报 `DuplicateKeyException`。
+
+**检查方法**：修改 `application.yml` 后，搜一下有没有重复的顶级 Key：
+```powershell
+Select-String "^[a-z]" src\main\resources\application.yml | ForEach-Object { $_.Line }
+# 看输出里有没有同名的行
+```
+
+---
+
+### ⚠️ 注意事项 5：StringRedisTemplate vs RedisTemplate 的区别
+
+**一句话**：凡是要被 Lua 脚本读取的 Key，必须用 `StringRedisTemplate`，不能用 `RedisTemplate<String,Object>`。
+
+**原因**：
+- `StringRedisTemplate` → Redis 存 `"100"`（纯字符串）→ Lua `tonumber()` 能解析 ✅
+- `RedisTemplate<String,Object>` 用 Jackson → Redis 存 `["java.lang.Long",100]` → Lua `tonumber()` 返回 nil ❌
+
+---
+
+### ⚠️ 注意事项 6：Knife4j 4.x 用 OpenAPI 3 注解，不再支持 Swagger 2 注解
+
+| Swagger 2（❌ 不支持）| OpenAPI 3（✅ 正确）|
+|---------------------|-------------------|
+| `@Api(tags = "xxx")` | `@Tag(name = "xxx")` |
+| `@ApiOperation("xxx")` | `@Operation(summary = "xxx")` |
+| `import io.swagger.annotations.*` | `import io.swagger.v3.oas.annotations.*` |
+
+---
+
+### ⚠️ 注意事项 7：Redis 缓存预热
+
+首次入库会自动同步 Redis。但如果 Redis 重启（`docker-compose restart redis`）或清空（`FLUSHDB`），缓存会消失。第一次下单时 Lua 返回 `-2`，代码会自动从 DB 补充，通常不影响业务，但并发极高时可能有短暂"库存不足"误报。
+
+**手动预热命令**：
+```bash
+curl -X POST http://localhost:8091/api/inventory/1/{skuId}/warmup
+```
+
+---
+
+## 17. 未完成的功能（TODO）
+
+> 记录还没做的事情，供后续迭代参考。
+
+### 🔴 高优先级（影响核心功能）
+
+| # | 功能 | 描述 | 涉及文件 |
+|---|------|------|---------|
+| 1 | **超卖并发演示** | 用 PowerShell 100 并发请求验证 Lua 防超卖效果 | 见第 9 节脚本 |
+| 2 | **基础数据初始化** | 每次重置 DB 后，需要手动插入分类、仓库、门店数据 | 见第 8.1 节 SQL |
+
+### 🟡 中优先级（Phase 2 功能外壳已预留）
+
+| # | 功能 | 描述 | 当前状态 |
+|---|------|------|---------|
+| 3 | **骑手配送模块** | `DeliveryController` / `DeliveryServiceImpl` 接口外壳已存在，业务逻辑未实现 | 接口返回空/TODO |
+| 4 | **金蝶云财务对接** | `KingdeeController` / `KingdeeDataSyncJob` 外壳已存在，HTTP 推送凭证逻辑未实现 | `kingdee.enabled=false` |
+| 5 | **Redisson 分布式锁** | 补货审批等高并发写操作建议加分布式锁，依赖已注释 | `pom.xml` 注释中 |
+
+### 🟢 低优先级（工程化完善）
+
+| # | 功能 | 描述 | 备注 |
+|---|------|------|------|
+| 6 | **JMeter 压测报告** | 用 JMeter 生成并发测试的 HTML 聚合报告 | 见第 9.3 节 |
+| 7 | **Kubernetes 部署** | 把 docker-compose 转为 k8s Deployment + Service | `k8s/` 目录已预留 |
+| 8 | **CI/CD 流水线** | GitHub Actions 自动构建 + 推送镜像到 Docker Hub | 未创建 `.github/workflows/` |
+| 9 | **生产环境配置** | 密码改用 Secrets 管理、Knife4j 开启密码保护、日志级别改 INFO | `application-prod.yml` 未创建 |
+| 10 | **数据库迁移工具** | 用 Flyway/Liquibase 管理 DDL 版本，替代手动 `init.sql` | 未引入 |
+| 11 | **单元测试** | Service 层核心逻辑（防超卖、FIFO、对账）缺乏单元测试 | `src/test/` 目录基本为空 |
+
+---
+
+### 下次开发从哪里开始？
+
+```
+最建议先做：
+1. 执行超卖演示（第9节），验证防超卖功能 → 是最重要的技术亮点
+2. 骑手配送模块业务实现 → 补全履约流程
+
+等待实现的接口（搜索 "TODO" 或 "Phase2"）：
+grep -r "TODO\|Phase2\|Phase 2" src/main/java/
+```
+
+---
+
+*文档版本: v1.2 | 2026-06-01 | 碧桂园旺生活 O2O 供应链中台*

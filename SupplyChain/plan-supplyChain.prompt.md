@@ -40,15 +40,15 @@
 |------|---------|---------|
 | 框架 | Spring Boot 2.6.13 | - |
 | ORM | MyBatis-Plus 3.5.3.1 | 条件构造器 + 自动分页 |
-| 数据库 | **MySQL 8.0**（mysql-connector-j 8.0.33） | 社区小店轻量场景，运维成本低，开发调试友好；支持 JSON 列、窗口函数 |
-| 缓存 | Redis + Redisson 3.17.7 | 库存预扣原子操作 + 分布式锁 |
-| 消息队列 | Kafka（主）| 库存/补货/预警异步解耦 |
+| 数据库 | **MySQL 8.0**（mysql-connector-j 8.0.33） | 社区小店轻量场景，支持 JSON 列、窗口函数 |
+| 缓存 | Redis 7（Lettuce 连接池）| 库存预扣原子操作；⚠️ Redisson 已注释（见Bug#6）|
+| 消息队列 | Kafka 3.6（KRaft模式，无ZooKeeper）| 库存/补货/预警异步解耦 |
 | 连接池 | Druid 1.2.20 | SQL 监控 + 慢查询告警 |
-| 工具 | Lombok、Hutool、Fastjson2 | - |
-| API文档 | Knife4j 3.0.3（Swagger UI） | - |
-| 监控 | Spring Boot Actuator | - |
+| 工具 | Lombok、Hutool、Fastjson2、commons-pool2 | - |
+| API文档 | **knife4j-openapi3-spring-boot-starter:4.4.0**（基于SpringDoc）| ⚠️ 原计划 Knife4j 3.0.3 因 Spring Boot 2.6.x NPE 已升级 |
+| 监控 | Spring Boot Actuator | 健康检查 /actuator/health |
 | 定时任务 | Spring @Scheduled | 生产可升级 XXL-Job |
-| HTTP Client | Spring RestTemplate / OkHttp | 金蝶云接口外壳预留 |
+| HTTP Client | OkHttp 4.10.0 | 金蝶云接口外壳预留 |
 
 ---
 
@@ -546,11 +546,11 @@ PENDING → ASSIGNED（派单）→ PICKING（取货中）→ IN_TRANSIT（配�
 
 3. ✅ **后期扩展预留** — 骑手配送 + 金蝶云对接在**本期建表 + 创建接口外壳**，方法体 `// TODO Phase2`，保证项目结构完整、下期可直接填充，不影响本期功能。
 
-4. **分布式锁粒度** — 锁 key 为 `inventory:lock:{warehouseId}:{skuId}`，粒度到 SKU+仓库，避免全局锁；Lua Script 比 Redisson 延迟更低，优先用 Lua，超复杂事务才用 Redisson。
+4. **分布式锁粒度** — 锁 key 为 `inventory:lock:{warehouseId}:{skuId}`，粒度到 SKU+仓库，避免全局锁；Lua Script 比 Redisson 延迟更低，优先用 Lua，超复杂事务才用 Redisson。⚠️ **实际状态**：Redisson 依赖已注释（无密码 Redis 会触发 AUTH 错误），Phase 2 实现时需先配置 Redis 密码再取消注释。
 
 5. **生鲜预警天数配置化** — 预警天数（3/7天）通过 `application.yml` `supply-chain.expiry.warn-days-near=7` / `warn-days-urgent=3` 配置，`@ConfigurationProperties` 注入，不同品类阈值后期升级为 DB 配置表。
 
-6. **MySQL 连接池配置** — Druid + `spring.datasource.url=jdbc:mysql://localhost:3306/sc_supply_chain?useUnicode=true&characterEncoding=utf8mb4&serverTimezone=Asia/Shanghai&useSSL=false`，`testWhileIdle=true` 防连接扔失。
+6. **MySQL 连接池配置** — Druid + `spring.datasource.url=jdbc:mysql://${DB_HOST}:${DB_PORT}/sc_supply_chain?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false`，`testWhileIdle=true` 防连接断失。⚠️ **注意**：`characterEncoding` 必须用 `UTF-8`（Java标准），不能用 `utf8mb4`（MySQL charset名），否则 JDBC 报错。Docker 容器内 `DB_PORT` 应为 `3306`（容器内部端口），宿主机访问用 `3307`。
 
 
 
@@ -558,29 +558,196 @@ PENDING → ASSIGNED（派单）→ PICKING（取货中）→ IN_TRANSIT（配�
 ✅ 执行完成 — 旺生活 O2O 供应链中台
 文件统计：74 个 Java 文件 + 3 个资源文件 + 1 个 pom.xml
 
-### 📦 模块结构
+---
 
-| 包/目录                                                                                                                                                                                                         |   内容 |
-|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------|
-| config/                                                                                                                                                                                                      |RedisConfig（Lua脚本注册）、KafkaConfig（7个Topic+DLT）、MybatisPlusConfig、MetaObjectFillHandler、SupplyChainProperties、SwaggerConfig |
-| entity/                                                                                                                                                                                                      | 16个实体：Spu、Sku、SpuCategory、Warehouse、Inventory、InventoryBatch、InventoryLog、ReplenishmentRule、ReplenishmentOrder、Store、FulfillmentOrder、FulfillmentRecord、ExpiryWarning + Phase2: Rider、DeliveryOrder、KingdeeSync |
-| enums/| 7个枚举：ProductStatus、FreshType、BatchStatus（四级效期）、FulfillmentOrderStatus、InventoryOpType、ReplenishmentStatus、DeliveryStatus                                                                                        |
-| mapper/                                                                                                                                                                                                      | 15个 Mapper（含 InventoryMapper 自定义 lockQty/unlockQty/confirmDeductQty、InventoryBatchMapper FIFO查询、ExpiryWarningMapper 临期扫描）                                                                                       |
-| service/                                                                                                                                                                                                     | 4个服务：ProductService（上下架状态机）、InventoryService（Lua预扣+FIFO+对账）、ReplenishmentService（阈值扫描）、FulfillmentService（全链路履约）                                                                                               |
-| controller/                                                                                                                                                                                                  | 6个接口：Product、Inventory、Replenishment、Fulfillment（含效期预警）、Delivery（Phase2外壳）、Kingdee（Phase2外壳）                                                                                                                  |
-| mq/                                                                                                                                                                                                          | InventoryEventProducer（deduct/restore/confirm/replenishment）                                                                                                                                                  |
-| listener/                                                                                                                                                                                                    | InventoryListener（DEDUCT/RESTORE/CONFIRM落库+DLT告警）、ReplenishmentListener（生成补货单）                                                                                                                                  |
-| job/                                                                                                                                                                                                         | ReplenishmentCheckJob（每30分钟）、ExpiryWarningJob（每天早8点四级预警）、InventoryReconcileJob（每天凌晨2点对账）、KingdeeDataSyncJob（Phase2外壳）                                                                                           |
-| integration/                                                                                                                                                                                                 | KingdeeApiClient（Phase2外壳，3种凭证方法）                                                                                                                                                                              |
-| exception/                                                                                                                                                                                                   | SupplyChainException（stockInsufficient/notFound/illegalStatus）、GlobalExceptionHandler                                                                                                                          |
-| util/                                                                                                                                                                                                        | RedisKeyUtil（所有Redis Key常量）   |                                                                                                                                                                                  |
-| resources                                                                                                                                                                                                    | application.yml（MySQL 8/Redis/Kafka/供应链配置）、lua/inventory_lock.lua（防超卖Lua）、db/init.sql（全量MySQL8 DDL + 测试数据） |                                                                                                     |
-### 🔑 核心技术实现
-防超卖：inventory_lock.lua Lua Script 原子检查+DECRBY，返回 -1（不足）/ -2（未预热）/ ≥0（成功）
-FIFO出库：InventoryBatchMapper.selectFifoBatches() + allocateFifo() 跨批次分配
-异步落库：预扣成功后 Kafka → InventoryListener 消费更新DB，失败重试3次→DLT
-定时对账：凌晨2点全量扫描 Redis vs DB，以DB为准修复，写对账流水
-效期四级：ExpiryWarningJob 每日8点扫描，NORMAL/NEAR_EXPIRY/URGENT/EXPIRED 分级处理
+## 实际落地状态（v1.2 | 2026-06-01）
+
+### ✅ 已完成清单
+
+| # | 内容 | 状态 |
+|---|------|------|
+| 1 | 74个Java文件 + application.yml + init.sql + inventory_lock.lua | ✅ 生成完毕 |
+| 2 | MySQL 8.0 + Redis + Kafka Docker 容器启动 | ✅ 运行中 |
+| 3 | Spring Boot 应用打包进 Docker（sc-app 容器）| ✅ 运行中（端口 8091）|
+| 4 | 9 个 Bug 修复（见下方 Bug 记录）| ✅ 全部修复 |
+| 5 | Knife4j 3.x → 4.4.0（基于 SpringDoc OpenAPI 3）| ✅ 升级完成 |
+| 6 | Controller 注解迁移（Swagger2 → OpenAPI3）| ✅ 完成 |
+| 7 | 日志落盘配置（app.log 自动写文件）| ✅ 完成 |
+| 8 | 完整业务流程测试（建SPU→建SKU→上架→入库→下单→支付→出库）| ✅ 验证通过 |
+
+### ⏳ 未完成清单（TODO）
+
+| # | 优先级 | 内容 | 说明 |
+|---|--------|------|------|
+| 1 | 🔴高 | 超卖并发演示 | 100并发下单只有10件库存，验证Lua防超卖 |
+| 2 | 🟡中 | 骑手配送模块业务实现 | DeliveryController外壳已有，逻辑待填充 |
+| 3 | 🟡中 | 金蝶云财务对接实现 | KingdeeApiClient外壳已有，HTTP逻辑待填充 |
+| 4 | 🟡中 | Redisson分布式锁启用 | 补货审批等场景，pom.xml已注释，激活需配置Redis密码 |
+| 5 | 🟢低 | JMeter压测HTML报告 | 图形化并发报告 |
+| 6 | 🟢低 | Kubernetes部署 | k8s/目录已预留 |
+| 7 | 🟢低 | CI/CD流水线 | GitHub Actions |
+| 8 | 🟢低 | 生产环境配置文件 | application-prod.yml（密码加密、日志INFO）|
+| 9 | 🟢低 | 单元测试 | Service层核心逻辑缺测试用例 |
+
+---
+
+## 实际使用的技术栈（与原计划的差异）
+
+| 层次 | 原计划 | **实际使用** | 变更原因 |
+|------|--------|------------|---------|
+| API 文档 | Knife4j 3.0.3（Springfox）| **knife4j-openapi3-spring-boot-starter:4.4.0** | Springfox 3.x + Spring Boot 2.6.x NPE兼容问题 |
+| Swagger 注解 | `@Api` / `@ApiOperation` | **`@Tag` / `@Operation`** | Knife4j 4.x 迁移到 OpenAPI 3 |
+| Redisson | redisson-spring-boot-starter:3.17.7 | **注释掉（暂未启用）** | 无密码Redis自动发`AUTH ""`导致启动失败 |
+| JDBC编码 | `characterEncoding=utf8mb4` | **`characterEncoding=UTF-8`** | utf8mb4是MySQL charset名，不是Java charset |
+| Spring Boot 运行方式 | 本地 mvn spring-boot:run | **Docker容器 sc-app** | 所有服务统一Docker，环境一致 |
+| Dockerfile | 多阶段Maven构建 | **单阶段（复制本地JAR）** | Docker内拉Maven依赖慢10分钟，改为本地先打包 |
+
+---
+
+## Docker 环境（当前运行状态）
+
+5个Docker容器全部运行，一条命令启动：
+
+```powershell
+# 第一步：打JAR（改代码后才需要）
+& "C:\WorkSoftware\Idea\IntelliJ IDEA 2025.3.1\plugins\maven\lib\maven3\bin\mvn.cmd" clean package -DskipTests -q
+
+# 第二步：启动全部服务
+cd C:\WorkSoftware\a_program\selft\smartoneCloud\SupplyChain
+docker-compose --progress plain up -d --build supply-chain-app
+```
+
+| 容器名 | 镜像 | 端口 | 用途 |
+|--------|------|------|------|
+| `sc-app` | 本地构建 | 8091:8091 | Spring Boot 应用 |
+| `sc-mysql` | mysql:8.0.33 | 3307:3306 | 主数据库 |
+| `sc-redis` | redis:7-alpine | 6380:6379 | 库存缓存 |
+| `sc-kafka` | confluentinc/cp-kafka:7.6.1 | 9092:9092 | 消息队列 |
+| `sc-kafka-ui` | provectuslabs/kafka-ui:latest | 8080:8080 | Kafka管理界面 |
+
+**访问地址：**
+- Knife4j UI：http://localhost:8091/doc.html ← **推荐**
+- Swagger UI：http://localhost:8091/swagger-ui/index.html
+- Kafka UI：http://localhost:8080
+- Druid监控：http://localhost:8091/druid/ (admin/admin123)
+
+---
+
+## Bug 修复记录（9个，全部已修复）
+
+### Bug #1 — Redis Lua `tonumber()` 解析失败（最关键）
+
+**现象**：入库成功，下单报"库存不足"，Redis 明明有值。
+
+**根因**：`RedisTemplate<String,Object>` + Jackson 序列化，Redis存的是 `["java.lang.Long",100]`，Lua `tonumber()` 无法解析，返回 nil。
+
+**修复**：改用 `StringRedisTemplate`，Redis 存纯字符串 `"100"`。
+
+```java
+// 修复前：redisTemplate.opsForValue().set(key, qty);  // ["java.lang.Long",100]
+// 修复后：stringRedisTemplate.opsForValue().set(key, String.valueOf(qty)); // "100"
+```
+
+---
+
+### Bug #2 — 缓存穿透：-2 返回值处理错误
+
+**根因**：Lua 返回 `-2` 表示缓存 Key 不存在，但代码把 `-2` 和 `-1`（库存不足）一起处理了，未触发缓存预热重试。
+
+**修复**：显式判断 `-2` → 从 DB 预热 Redis → 重试 Lua。
+
+---
+
+### Bug #3 — FulfillmentOrder 缺 warehouseId 字段
+
+**根因**：实体类没有 `warehouseId`，取消/出库时用硬编码 `DEFAULT_WAREHOUSE_ID=1`，多仓场景出错。
+
+**修复**：实体加字段，下单时保存，出库/取消时用 `order.getWarehouseId()`。
+
+---
+
+### Bug #4 — 效期预警 warn_time 为 null
+
+**根因**：`MetaObjectFillHandler` 的 `insertFill()` 没填充 `warnTime`。
+
+**修复**：`insertFill()` 补充 `warnTime` 自动填充。
+
+---
+
+### Bug #5 — JDBC 编码参数错误
+
+**根因**：`characterEncoding=utf8mb4` 是 MySQL 字符集名，不是 Java 标准字符集名。
+
+**修复**：改为 `characterEncoding=UTF-8`。
+
+---
+
+### Bug #6 — Redisson 无密码 Redis 报 AUTH 错误
+
+**根因**：`redisson-spring-boot-starter` 自动连接 Redis 并发 `AUTH ""`，无密码 Redis 拒绝。
+
+**修复**：注释掉该依赖（代码未实际使用 Redisson，是 Phase 2 预留）。
+
+---
+
+### Bug #7 — Springfox 3.0.0 + Spring Boot 2.6.x NPE
+
+**根因**：Spring Boot 2.6.x 路径匹配改用 `PathPatternParser`，Springfox 内部写死 `AntPathMatcher`，不兼容。
+
+**修复**：放弃 Springfox/Knife4j 3.x，直接升级到 Knife4j 4.4.0（基于 SpringDoc）。
+
+---
+
+### Bug #8 — application.yml 重复 `logging:` key
+
+**根因**：修改日志配置时误写了两个 `logging:` 块，YAML 不允许同层重复 key。
+
+**修复**：合并为一个 `logging:` 块。
+
+---
+
+### Bug #9 — Docker 容器内 DB 连接失败（端口默认值错误）
+
+**根因**：`DB_PORT` 默认值写的是 `3307`（宿主机映射端口），但容器内应连 `mysql:3306`（Docker内部端口）。
+
+**修复**：默认值改为 `3306`。
+
+---
+
+## 📦 模块结构
+
+| 包/目录 | 内容 |
+|---------|------|
+| config/ | RedisConfig（Lua脚本注册）、KafkaConfig（7个Topic+DLT）、MybatisPlusConfig、MetaObjectFillHandler、SupplyChainProperties、SwaggerConfig（Knife4j 4.x OpenAPI Bean） |
+| entity/ | 16个实体：Spu、Sku、SpuCategory、Warehouse、Inventory、InventoryBatch、InventoryLog、ReplenishmentRule、ReplenishmentOrder、Store、FulfillmentOrder（含warehouseId字段）、FulfillmentRecord、ExpiryWarning + Phase2: Rider、DeliveryOrder、KingdeeSync |
+| enums/ | 7个枚举：ProductStatus、FreshType、BatchStatus（四级效期）、FulfillmentOrderStatus、InventoryOpType、ReplenishmentStatus、DeliveryStatus |
+| mapper/ | 15个 Mapper（含 InventoryMapper 自定义 lockQty/unlockQty/confirmDeductQty、InventoryBatchMapper FIFO查询、ExpiryWarningMapper 临期扫描）|
+| service/ | 4个服务：ProductService（上下架状态机）、InventoryService（Lua预扣+FIFO+对账）、ReplenishmentService（阈值扫描）、FulfillmentService（全链路履约）|
+| controller/ | 6个接口：Product、Inventory、Replenishment、Fulfillment（含效期预警）、Delivery（Phase2外壳）、Kingdee（Phase2外壳）|
+| mq/ | InventoryEventProducer（deduct/restore/confirm/replenishment）|
+| listener/ | InventoryListener（DEDUCT/RESTORE/CONFIRM落库+DLT告警）、ReplenishmentListener（生成补货单）|
+| job/ | ReplenishmentCheckJob（每30分钟）、ExpiryWarningJob（每天早8点四级预警）、InventoryReconcileJob（每天凌晨2点对账）、KingdeeDataSyncJob（Phase2外壳）|
+| integration/ | KingdeeApiClient（Phase2外壳，3种凭证方法）|
+| exception/ | SupplyChainException（stockInsufficient/notFound/illegalStatus）、GlobalExceptionHandler |
+| util/ | RedisKeyUtil（所有Redis Key常量）|
+| resources/ | application.yml（MySQL8/Redis/Kafka/Knife4j/供应链配置）、lua/inventory_lock.lua（防超卖Lua）、db/init.sql（全量MySQL8 DDL，16张表）|
+
+---
+
+## 🔑 核心技术实现
+
+**防超卖（最重要）**：`inventory_lock.lua` Lua Script 原子检查+DECRBY，返回 `-1`（库存不足）/ `-2`（Key不存在，触发预热重试）/ `≥0`（成功）。必须用 `StringRedisTemplate` 存纯字符串，否则 `tonumber()` 无法解析。
+
+**FIFO出库**：`InventoryBatchMapper.selectFifoBatches()` 按 `inbound_time ASC` 排序 + `allocateFifo()` 跨批次分配，返回 `List<BatchAllocation>`。
+
+**异步落库**：预扣成功后发 Kafka `sc.inventory.deduct` → `InventoryListener` 消费更新DB，失败重试3次后进DLT死信队列人工介入。
+
+**定时对账**：`InventoryReconcileJob` 凌晨2点全量扫描 Redis vs DB，以DB为准修复Redis漂移，写对账流水。
+
+**效期四级**：`ExpiryWarningJob` 每日8点扫描，NORMAL/NEAR_EXPIRY(≤7天)/URGENT(≤3天)/EXPIRED 分级处理，预警天数通过 `application.yml` 配置。
+
+**API文档**：Knife4j 4.4.0，访问 http://localhost:8091/doc.html，左侧菜单按 Tag 分组（商品中心/库存管理/O2O履约/补货管理/效期预警/数据对账）。
+
 
 
 
