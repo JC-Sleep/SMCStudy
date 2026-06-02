@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>🦟 灭蚊统计仪表盘</title>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,"Segoe UI",Arial;margin:0;padding:24px;
+       background:linear-gradient(135deg,#0f1117,#1a1d27);color:#e6e6e6;min-height:100vh}
+  h1{margin:0 0 24px;font-weight:600}
+  .setup{background:#1a1d27;padding:16px;border-radius:12px;margin-bottom:20px;
+         display:flex;gap:8px;align-items:center;flex-wrap:wrap;border:1px solid #2a2f3d}
+  .setup input{background:#0f1117;border:1px solid #2a2f3d;color:#fff;padding:8px 12px;
+               border-radius:8px;font-size:14px;flex:1;min-width:180px}
+  .setup button{background:#4ade80;color:#062a14;border:0;padding:8px 18px;
+                border-radius:8px;font-weight:600;cursor:pointer}
+  .setup .status{font-size:12px;padding:4px 10px;border-radius:20px}
+  .ok{background:#064e3b;color:#4ade80}
+  .err{background:#7f1d1d;color:#fca5a5}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:20px}
+  .card{background:#1a1d27;border:1px solid #2a2f3d;border-radius:14px;padding:20px;
+        box-shadow:0 4px 16px #0008}
+  .card .lbl{font-size:13px;color:#9ca3af;margin-bottom:8px}
+  .card .val{font-size:42px;font-weight:700;line-height:1}
+  .v-green{color:#4ade80}.v-amber{color:#fbbf24}.v-blue{color:#60a5fa}.v-pink{color:#f472b6}
+  .card .sub{font-size:12px;color:#6b7280;margin-top:6px}
+
+  .chart{background:#1a1d27;border:1px solid #2a2f3d;border-radius:14px;padding:20px;margin-bottom:20px}
+  .chart h2{margin:0 0 16px;font-size:16px;font-weight:600;color:#9ca3af}
+  .bars{display:flex;align-items:flex-end;gap:4px;height:240px;padding:20px 0 0}
+  .bar{flex:1;background:linear-gradient(180deg,#4ade80,#16a34a);
+       border-radius:4px 4px 0 0;min-height:2px;position:relative;transition:height .4s}
+  .bar:hover{filter:brightness(1.2)}
+  .bar .v{position:absolute;top:-22px;left:50%;transform:translateX(-50%);
+          font-size:11px;color:#9ca3af;font-weight:600;white-space:nowrap}
+  .lbls{display:flex;gap:4px;margin-top:8px;font-size:11px;color:#6b7280}
+  .lbls div{flex:1;text-align:center}
+
+  .controls{background:#1a1d27;border:1px solid #2a2f3d;border-radius:14px;padding:20px}
+  .controls h2{margin:0 0 16px;font-size:16px;color:#9ca3af}
+  .row{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+  .row label{min-width:80px;color:#9ca3af;font-size:13px}
+  input[type=range]{flex:1;min-width:200px}
+  .live{font-family:'Courier New',monospace;color:#fbbf24;font-weight:700;
+        background:#0f1117;padding:4px 10px;border-radius:6px}
+  .danger{background:#ef4444;color:#fff;border:0;padding:8px 18px;border-radius:8px;cursor:pointer}
+  .danger:hover{background:#dc2626}
+  .meter{height:8px;background:#0f1117;border-radius:4px;overflow:hidden;flex:1;min-width:200px}
+  .meter-fill{height:100%;background:#fbbf24;transition:width .1s}
+</style>
+</head>
+<body>
+
+<h1>🦟 ESP8266 灭蚊统计仪表盘</h1>
+
+<div class="setup">
+  <label>ESP8266 IP:</label>
+  <input id="ip" placeholder="例如 192.168.1.100" />
+  <button onclick="connect()">连接</button>
+  <span id="conn" class="status err">未连接</span>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <div class="lbl">总击杀数</div>
+    <div class="val v-green" id="total">—</div>
+    <div class="sub">累计</div>
+  </div>
+  <div class="card">
+    <div class="lbl">最近 24 小时</div>
+    <div class="val v-blue" id="today">—</div>
+    <div class="sub">滚动窗口</div>
+  </div>
+  <div class="card">
+    <div class="lbl">峰值小时</div>
+    <div class="val v-pink" id="peak">—</div>
+    <div class="sub" id="peakTime">—</div>
+  </div>
+  <div class="card">
+    <div class="lbl">连接</div>
+    <div class="val v-amber" id="ssid" style="font-size:18px;line-height:1.4">—</div>
+    <div class="sub" id="ipShow">—</div>
+  </div>
+</div>
+
+<div class="chart">
+  <h2>📊 24 小时击杀分布（柱状图）</h2>
+  <div class="bars" id="bars"></div>
+  <div class="lbls" id="lbls"></div>
+</div>
+
+<div class="controls">
+  <h2>⚙️ 控制 / 校准</h2>
+  <div class="row">
+    <label>实时尖峰</label>
+    <div class="meter"><div class="meter-fill" id="meter" style="width:0%"></div></div>
+    <span class="live" id="diff">0</span>
+  </div>
+  <div class="row">
+    <label>阈值</label>
+    <input type="range" id="thr" min="20" max="500" step="5" disabled>
+    <span class="live" id="thrv">—</span>
+  </div>
+  <div class="row">
+    <label></label>
+    <button class="danger" onclick="reset()">清零所有计数</button>
+    <span style="font-size:12px;color:#6b7280">阈值越大越不灵敏。建议设为击杀时尖峰幅度的 60%。</span>
+  </div>
+</div>
+
+<script>
+let baseUrl = '';
+let timer = null;
+
+function setStatus(ok, msg){
+  const el = document.getElementById('conn');
+  el.textContent = msg;
+  el.className = 'status ' + (ok?'ok':'err');
+}
+
+function connect(){
+  const ip = document.getElementById('ip').value.trim();
+  if(!ip){ alert('请输入 IP'); return; }
+  baseUrl = ip.startsWith('http')? ip : ('http://'+ip);
+  localStorage.setItem('mk_ip', ip);
+  document.getElementById('thr').disabled = false;
+  if(timer) clearInterval(timer);
+  fetchData();
+  timer = setInterval(fetchData, 1000);
+}
+
+async function fetchData(){
+  try{
+    const r = await fetch(baseUrl + '/api/status', {cache:'no-store'});
+    if(!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    setStatus(true, '已连接');
+
+    document.getElementById('total').textContent = d.total;
+    document.getElementById('today').textContent = d.today;
+    document.getElementById('ssid').textContent  = d.ssid || '-';
+    document.getElementById('ipShow').textContent= d.ip;
+    document.getElementById('diff').textContent  = d.diff;
+    document.getElementById('thrv').textContent  = d.thr;
+    document.getElementById('meter').style.width = Math.min(100, d.diff/5) + '%';
+
+    if(document.activeElement.id !== 'thr')
+      document.getElementById('thr').value = d.thr;
+
+    // 峰值小时
+    let maxV = 0, maxI = -1;
+    for(let i=0;i<24;i++) if(d.hourly[i]>maxV){maxV=d.hourly[i];maxI=i;}
+    document.getElementById('peak').textContent = maxV;
+    document.getElementById('peakTime').textContent = maxI<0?'-':((23-maxI)+' 小时前');
+
+    // 柱状图：d.hourly[0] 是 24小时前，d.hourly[23] 是当前小时
+    const max = Math.max(1, ...d.hourly);
+    const bars = document.getElementById('bars');
+    const lbls = document.getElementById('lbls');
+    bars.innerHTML=''; lbls.innerHTML='';
+    for(let i=0;i<24;i++){
+      const v = d.hourly[i];
+      const b = document.createElement('div');
+      b.className = 'bar';
+      b.style.height = (v/max*100)+'%';
+      b.title = (23-i)+' 小时前: '+v+' 只';
+      if(v>0){ const s = document.createElement('div'); s.className='v'; s.textContent=v; b.appendChild(s); }
+      bars.appendChild(b);
+
+      const l = document.createElement('div');
+      l.textContent = (i%4===0 || i===23) ? ('-'+(23-i)+'h') : '';
+      lbls.appendChild(l);
+    }
+  }catch(e){
+    setStatus(false, '连接失败：'+e.message);
+  }
+}
+
+document.getElementById('thr').addEventListener('change', async (e)=>{
+  try{ await fetch(baseUrl+'/api/threshold?v='+e.target.value); fetchData(); }catch{}
+});
+async function reset(){
+  if(!confirm('确定清零总数和24小时统计?')) return;
+  try{ await fetch(baseUrl+'/api/reset', {method:'POST'}); fetchData(); }catch{}
+}
+
+// 启动时尝试恢复
+const saved = localStorage.getItem('mk_ip');
+if(saved){ document.getElementById('ip').value = saved; connect(); }
+</script>
+</body>
+</html>
