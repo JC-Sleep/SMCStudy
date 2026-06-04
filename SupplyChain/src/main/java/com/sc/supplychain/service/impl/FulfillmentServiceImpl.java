@@ -58,35 +58,19 @@ public class FulfillmentServiceImpl implements FulfillmentService {
         return orderNo;
     }
 
-    /**
-     * 取消订单。
-     * 【B3 修复】用条件 UPDATE 抢占式取消，affected=0 直接退出，绝不会双倍释放库存。
-     * 【B4 修复】状态白名单收紧到 PENDING / PAID，OUTBOUND/PICKING/DELIVERED/CANCELLED 全部禁止取消。
-     */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void cancelOrder(String orderNo) {
         FulfillmentOrder order = requireOrder(orderNo);
-
-        // ───── B4：白名单校验（先做友好提示，再做原子保护）─────
-        String status = order.getStatus();
-        if (!FulfillmentOrderStatus.PENDING.getCode().equals(status)
-                && !FulfillmentOrderStatus.PAID.getCode().equals(status)) {
-            throw SupplyChainException.illegalStatus(
-                    "订单当前状态=" + status + "，仅 PENDING/PAID 可取消");
+        if (FulfillmentOrderStatus.DELIVERED.getCode().equals(order.getStatus()) ||
+            FulfillmentOrderStatus.CANCELLED.getCode().equals(order.getStatus())) {
+            throw SupplyChainException.illegalStatus("已完成/已取消的订单不能再取消");
         }
-
-        // ───── B3：原子条件 UPDATE 抢占取消权 ─────
-        int affected = orderMapper.cancelIfCancelable(orderNo);
-        if (affected == 0) {
-            // 并发场景下另一个线程已成功取消（或状态被其他流程改走）
-            log.warn("[取消][并发抢占失败] orderNo={} 已被其他线程处理或状态已变更，跳过释放", orderNo);
-            return;
-        }
-
-        // ───── 抢到取消权：释放预扣库存 ─────
+        // 释放预扣 — use the warehouse recorded on the order (not hardcoded constant)
         Long whId = order.getWarehouseId() != null ? order.getWarehouseId() : DEFAULT_WAREHOUSE_ID;
         inventoryService.unlockStock(whId, order.getSkuId(), order.getQty(), orderNo);
+        order.setStatus(FulfillmentOrderStatus.CANCELLED.getCode());
+        orderMapper.updateById(order);
         writeRecord(order.getId(), "CANCEL", "system", "订单取消，库存归还");
         log.info("[取消] orderNo={}", orderNo);
     }
