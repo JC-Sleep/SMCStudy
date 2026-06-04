@@ -2,7 +2,6 @@ package com.sc.supplychain.service.impl;
 
 import cn.hutool.core.date.DateUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.sc.supplychain.config.KafkaConfig;
 import com.sc.supplychain.config.SupplyChainProperties;
 import com.sc.supplychain.dto.BatchAllocation;
 import com.sc.supplychain.dto.InventoryEventMessage;
@@ -21,7 +20,6 @@ import com.sc.supplychain.service.InventoryService;
 import com.sc.supplychain.util.RedisKeyUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
@@ -40,7 +38,6 @@ public class InventoryServiceImpl implements InventoryService {
     private final InventoryMapper inventoryMapper;
     private final InventoryBatchMapper batchMapper;
     private final InventoryLogMapper logMapper;
-    private final RedisTemplate<String, Object> redisTemplate;
     /** Use StringRedisTemplate for all numeric Redis ops so Lua tonumber() works on plain integers */
     private final StringRedisTemplate stringRedisTemplate;
     private final DefaultRedisScript<Long> inventoryLockScript;
@@ -83,13 +80,15 @@ public class InventoryServiceImpl implements InventoryService {
             throw SupplyChainException.of("入库更新DB库存失败 skuId=" + skuId);
         }
 
-        // 4. Sync Redis: always set to exact DB value after inbound for correctness
-        //    Use stringRedisTemplate so value is stored as plain integer string "100"
-        //    (NOT Jackson-serialized ["java.lang.Long",100] which breaks Lua tonumber())
+        // 4. Sync Redis（B5 修复）：用 INCRBY 累加而不是 SET 覆盖，避免并发入库时
+        //    "T2 用旧 SELECT 值 SET" 把中间用户下单的扣减覆盖回去导致超卖。
+        //    仅当 key 已存在时才 INCRBY；不存在则不创建，让首次下单触发 warmup 从 DB 拉取。
         String redisKey = RedisKeyUtil.inventoryAvailable(warehouseId, skuId);
-        Inventory freshInv = getInventory(warehouseId, skuId);
-        if (freshInv != null) {
-            stringRedisTemplate.opsForValue().set(redisKey, String.valueOf(freshInv.getAvailableQty()));
+        Boolean keyExists = stringRedisTemplate.hasKey(redisKey);
+        if (Boolean.TRUE.equals(keyExists)) {
+            stringRedisTemplate.opsForValue().increment(redisKey, qty);
+        } else {
+            log.info("[入库] Redis key 不存在，跳过 INCRBY，留给首次 lockStock 触发 warmup skuId={}", skuId);
         }
         // ZSet records batch FIFO order (score = inboundTime millis, member = batchNo)
         double score = batch.getInboundTime()
@@ -214,6 +213,13 @@ public class InventoryServiceImpl implements InventoryService {
         }
     }
 
+    /**
+     * 缓存预热。
+     * 【B7 修复】用 SETNX (setIfAbsent) 替代 SET：
+     *   - 100 个并发都看到 -2 → 都触发 warmup，但只有第 1 个 SETNX 成功
+     *   - 后续的 SETNX 因 key 已存在直接返回 false，不会覆盖前面 Lua DECRBY 的扣减
+     *   - 杜绝"预热互相覆盖→超卖"
+     */
     @Override
     public void warmupRedisStock(Long warehouseId, Long skuId) {
         Inventory inv = getInventory(warehouseId, skuId);
@@ -222,9 +228,14 @@ public class InventoryServiceImpl implements InventoryService {
             return;
         }
         String key = RedisKeyUtil.inventoryAvailable(warehouseId, skuId);
-        // Store as plain integer string so Lua tonumber() works correctly
-        stringRedisTemplate.opsForValue().set(key, String.valueOf(inv.getAvailableQty()));
-        log.info("[warmup] Redis key={} set to {}", key, inv.getAvailableQty());
+        // SETNX：仅当 key 不存在时设置；返回 true=本次抢到设置权，false=别人已设置
+        Boolean ok = stringRedisTemplate.opsForValue()
+                .setIfAbsent(key, String.valueOf(inv.getAvailableQty()));
+        if (Boolean.TRUE.equals(ok)) {
+            log.info("[warmup][SETNX成功] key={} value={}", key, inv.getAvailableQty());
+        } else {
+            log.info("[warmup][SETNX跳过] key={} 已被其他线程预热，避免覆盖", key);
+        }
     }
 
     // ── 定时对账 ────────────────────────────────────────────────────
