@@ -748,6 +748,260 @@ docker-compose --progress plain up -d --build supply-chain-app
 
 **API文档**：Knife4j 4.4.0，访问 http://localhost:8091/doc.html，左侧菜单按 Tag 分组（商品中心/库存管理/O2O履约/补货管理/效期预警/数据对账）。
 
+---
 
+## 🐛 当前系统已知 Bug & 设计缺陷（深度审计 | 2026-06-03）
 
+> 上面 9 个 Bug 是**启动期已修复**的硬错误。下面这些是**对现有代码做深度审计**后发现的**仍然存在**的并发/一致性/可靠性问题，绝大多数在低并发演示下不会暴露，但在生产或压测时会出问题。**全部都是真实代码逻辑问题，不是假想。**
 
+### 🔴 Critical（必须修，影响正确性）
+
+#### B1 — Kafka 消费者**没有幂等检查**（重复消费会导致 DB 库存重复扣减）
+
+**位置**：`InventoryListener.onDeduct/onRestore/onConfirm`
+
+**现象**：Kafka 是 at-least-once 语义。容器重启、ack 失败、rebalance 都会导致同一条消息被消费多次。当前消费逻辑只是直接执行 SQL 更新，无幂等键。
+
+**后果**：一笔订单的 `lockQty` 落库执行两次 → DB `locked_qty` 被加 2 倍。直到凌晨对账才会发现 Redis vs DB 漂移。
+
+**修复**：用 `sc_inventory_log` 表的 `(ref_no, op_type)` 加唯一索引做幂等键，消费前先查 log 是否已存在。
+
+---
+
+#### B2 — Redis 预扣与 DB 落库的**时序竞争**（出库失败）
+
+**位置**：`FulfillmentServiceImpl.outbound()` → `confirmDeduct()` → `confirmDeductQty` SQL `WHERE locked_qty >= qty`
+
+**现象**：
+1. 用户下单 → `lockStock` Redis 立即扣减 + 发 Kafka `inventory.deduct` 消息（异步）
+2. 用户立刻支付 + 出库（极速 demo / 慢消费场景）
+3. `confirmDeduct` 执行 SQL：`UPDATE ... WHERE locked_qty >= qty`，**但 Kafka 消息还没被消费，DB locked_qty 仍是 0** → affected = 0 → 抛 `FIFO批次扣减失败`
+
+**后果**：合法订单出库失败。
+
+**修复**：`outbound` 时先确保 deduct 消息已落库（同步等待 / 改用同步双写 / 业务上 PAID→OUTBOUND 之间有人工拣货时差，问题被天然规避）。
+
+---
+
+#### B3 — `cancelOrder` **无状态原子保护**（并发取消会双倍释放库存）
+
+**位置**：`FulfillmentServiceImpl.cancelOrder`
+
+**现象**：当前代码先 select → 判断状态 → unlockStock → updateById。两个并发取消请求都通过状态检查，都执行 `unlockStock` → Redis +qty 两次（凭空多出库存）+ DB `unlockQty` SQL 也执行两次。
+
+**后果**：库存超发 / DB 数据漂移。
+
+**修复**：用条件 update：
+```sql
+UPDATE sc_fulfillment_order SET status='CANCELLED'
+WHERE order_no=? AND status IN ('PENDING','PAID')
+```
+返回 `affected==0` 直接跳过释放逻辑。
+
+---
+
+#### B4 — `cancelOrder` 允许 **OUTBOUND 后取消**（库存错乱）
+
+**位置**：`FulfillmentServiceImpl.cancelOrder` line 65
+
+**现象**：当前只排除了 `DELIVERED` / `CANCELLED`，但 `PICKING / OUTBOUND` 状态都允许取消。OUTBOUND 后真实库存已经通过 `confirmDeduct` 扣掉了（`locked_qty/total_qty -= qty`），再 unlock 会让 Redis += qty（凭空多货），DB `unlockQty` 因 `locked_qty < qty` 静默失败。
+
+**修复**：`if (!PENDING && !PAID) throw`。
+
+---
+
+#### B5 — `inbound` Redis 同步**非原子**（并发入库覆盖丢失）
+
+**位置**：`InventoryServiceImpl.inbound` line 86-93
+
+**现象**：步骤是 ① DB +qty ② **重新 select DB** ③ `set Redis = DB值`（覆盖式）。
+
+并发场景：
+- T1 入库 100 → DB=100 → set Redis=100
+- T2 同时入库 50 → DB=150 → set Redis=150
+- 但中间用户下单减了 10，Redis 已经是 90 → T2 的 set 把 Redis 覆盖回 150（多出 10）→ 超卖
+
+**修复**：用 `INCRBY qty` 而不是 `SET DB值`，让 Redis 累加。
+
+---
+
+#### B6 — `lockStock` + `createOrder` 跨"业务+消息"**不一致**
+
+**位置**：`FulfillmentServiceImpl.createOrder` (transactional) → `inventoryService.lockStock` 内部 Redis 扣减 + Kafka 发送
+
+**现象**：
+1. lockStock 成功（Redis 已扣减、Kafka 消息已发出）
+2. 接着 `orderMapper.insert(order)` 因为某种原因失败（DB死锁、唯一键冲突等）
+3. 事务回滚订单，但 **Redis 已扣 + Kafka 消息已发**
+4. 结果：库存被吃掉但订单不存在
+
+**修复**：transactional outbox 模式，或用 `TransactionalEventListener(AFTER_COMMIT)` 把 Kafka send 移到事务提交后；或反过来：发送失败时主动 INCRBY 回滚 Redis。
+
+---
+
+#### B7 — `warmupRedisStock` **没有锁**（多请求同时预热互相覆盖）
+
+**位置**：`InventoryServiceImpl.warmupRedisStock`
+
+**现象**：100 个并发请求都看到 Lua 返回 -2，都触发 `warmupRedisStock` → 都执行 `set Redis = DB值`。期间任何一个请求 Lua 扣减成功后，被后续 warmup 覆盖回原值 → 超卖。
+
+**修复**：warmup 用 `SET NX`（只在 key 不存在时 set），或加分布式锁 `inventory:warmup:lock:{wh}:{sku}`。
+
+---
+
+### 🟡 High（影响生产可靠性）
+
+#### B8 — `allocateFifo` **没有分布式锁**（并发出库批次分配冲突）
+
+**位置**：`InventoryServiceImpl.allocateFifo`
+
+两个并发出库都 SELECT 拿到相同批次列表，都尝试扣减同一批次的 remain_qty。`deductBatchRemain` SQL 应该有 `WHERE remain_qty >= qty` 做乐观保护，第二个失败 throw 导致整个事务回滚——但**第一个事务可能已经写了流水/部分扣减成功**，业务报错。
+
+**修复**：`allocateFifo + deductBatchRemain` 整个流程加 Redisson 锁 `inventory:fifo:lock:{wh}:{sku}`。
+
+---
+
+#### B9 — `InventoryReconcileJob` 修复时**没锁**（修复期间被并发下单覆盖）
+
+**位置**：`InventoryServiceImpl.reconcile` line 246
+
+**现象**：reconcile 读 Redis（=98） vs DB（=100，因为对账时正好有未处理 deduct 消息），判定 diff=2 → 强制 set Redis=100。但这时如果有用户下单刚把 Redis 减到 97，被 set 覆盖回 100 → 超卖 3 件。
+
+**修复**：reconcile 期间用 SETNX 做修复锁，或仅记录差异告警人工核对，不自动 set。
+
+---
+
+#### B10 — DLT **路由没配置**，重试逻辑形同虚设
+
+**位置**：`InventoryListener` 所有 onXxx 方法 + `application.yml`
+
+**现象**：代码定义了 `TOPIC_INVENTORY_DEDUCT_DLT` 但 `@KafkaListener` **没绑定** `RetryTopicConfiguration` 或 `DefaultErrorHandler`，消息异常时 throw 后只是默认行为（容器自带 SeekToCurrentErrorHandler 无限重试），从不进入 DLT。
+
+`onRestore / onConfirm` topic 甚至**根本没定义 DLT topic**。
+
+**修复**：注册 `DefaultErrorHandler` + `DeadLetterPublishingRecoverer`，配置最大重试 3 次后路由到 `.dlt`。
+
+---
+
+#### B11 — DLT 处理器**只打日志**
+
+**位置**：`InventoryListener.onDeductDlt`
+
+**现象**：仅 `log.error` + `ack`，没有持久化失败消息到 DB、没有发送告警通知。运维查不到失败列表。
+
+**修复**：失败消息写入 `sc_dead_letter` 表 + 钉钉/邮件告警。
+
+---
+
+#### B12 — `InventoryListener.onDeduct` 数据不一致**被忽略**
+
+**位置**：`InventoryListener.onDeduct` line 33
+
+**现象**：`lockQty SQL` 因 `available_qty >= qty` 不成立 affected==0 时，只 `log.warn` **然后正常 ack**。Redis 已扣减，DB 没扣减 → 永久数据漂移直到对账。
+
+**修复**：affected==0 时 throw 让消息进 DLT，人工介入。
+
+---
+
+#### B13 — 所有定时任务**无分布式锁**（多实例部署重复执行）
+
+**位置**：`InventoryReconcileJob` / `ExpiryWarningJob` / `ReplenishmentCheckJob` / `KingdeeDataSyncJob`
+
+**现象**：`@Scheduled` 是单 JVM 内调度。如果将来 sc-app 部署多副本（K8s、多容器），所有副本都会跑同一个任务 → 重复对账（互相覆盖）/ 重复生成补货单 / 重复发预警短信。
+
+**修复**：引入 ShedLock + Redis/MySQL 后端，或用 Redisson 分布式锁守护任务入口。
+
+---
+
+#### B14 — `getOrCreateInventory` **首次入库并发抛 DuplicateKey**
+
+**位置**：`InventoryServiceImpl.getOrCreateInventory`
+
+**现象**：先 select → null → insert。两个并发首次入库同一 SKU+仓库都走 insert → unique key `uk_sku_wh` 抛 `DuplicateKeyException` → 一个事务失败回滚。
+
+**修复**：改用 `INSERT ... ON DUPLICATE KEY UPDATE`，或 try-catch 捕获后重新 select。
+
+---
+
+#### B15 — `getAvailableFromRedis` **缓存未命中误判为 0**
+
+**位置**：`InventoryServiceImpl.getAvailableFromRedis` 被 `ReplenishmentServiceImpl.checkAndTrigger` 调用
+
+**现象**：Redis 没预热（应用刚启动 / Redis 重启）时 `getAvailableFromRedis` 返回 0，`checkAndTrigger` 当作"库存归零"立即触发**误补货**。
+
+**修复**：返回 -1 / Optional.empty() 表示未知；调用方 fallback 查 DB，或先 warmup。
+
+---
+
+### 🟢 Medium（建议修）
+
+#### B16 — `orderNo` UUID 截断到 16 字符**有重复风险**
+
+**位置**：`FulfillmentServiceImpl.createOrder` line 38：`IdUtil.fastSimpleUUID().toUpperCase().substring(0, 16)`
+
+UUID 截断后哈希空间从 2^128 缩到 2^64，大量并发下单时**理论可能冲突**。订单表 `order_no` 有 UNIQUE 约束，冲突时直接报错。
+
+**修复**：用全 UUID 或雪花 ID（`IdUtil.getSnowflake().nextIdStr()`）。
+
+---
+
+#### B17 — `ProductService.onSale/offSale` **无并发保护**
+
+并发上下架不会冲突（最终结果一致），但流水会写两条；如果未来加预校验"必须有库存"，就会被并发绕过。
+
+**修复**：用 `WHERE id=? AND status=?` 条件 update，affected==0 抛已变更。
+
+---
+
+#### B18 — `freshType` 字段**无枚举校验**
+
+`SpuRequest.freshType` 是 String，传任意值都会被接受，DB 存脏数据。
+
+**修复**：DTO 加 `@Pattern` 或转 `FreshType` enum。
+
+---
+
+#### B19 — `InventoryServiceImpl` 有未使用的 `RedisTemplate<String,Object>` 字段（dead code）
+
+line 43。该字段是 Bug #1 修复前的旧引用，现已被 `stringRedisTemplate` 取代但未删除。
+
+---
+
+#### B20 — `inventoryMapper.lockQty` SQL 条件**与 Redis 已扣减冲突**
+
+`UPDATE ... WHERE available_qty >= qty` 这个条件会导致 Kafka 消息处理时如果 DB 已被对账修复或并发 lockQty 扰动，affected==0 → 数据漂移（关联 B12）。
+
+**修复**：去掉 `available_qty >= qty` 条件（接受 DB 临时为负，对账兜底），或改为乐观锁版本号。
+
+---
+
+#### B21 — `application.yml` Kafka **手动 ACK 配置可能缺失**
+
+代码用 `Acknowledgment ack` 手动 ack，但 yml 必须配 `spring.kafka.listener.ack-mode: MANUAL_IMMEDIATE` + `enable-auto-commit: false` 才生效，需检查（当前若使用默认 BATCH 模式，Acknowledgment 调用其实没意义）。
+
+---
+
+### 已知但**不打算修**（理由：不影响核心演示）
+
+| 不修原因 | 项目 |
+|---------|------|
+| 演示项目 | 配置中心、链路追踪、监控告警 |
+| Phase 2 | 骑手分配算法、金蝶推送 HTTP 实现 |
+| 单测 | Service 层单元测试（Mockito + Testcontainers）|
+
+---
+
+### 修复优先级建议
+
+| 优先级 | Bug | 一句话 |
+|--------|-----|--------|
+| 🔴 P0 | B1 | Kafka 消费者加幂等键（log 表唯一索引）|
+| 🔴 P0 | B3 | cancelOrder 改成条件 update |
+| 🔴 P0 | B4 | cancelOrder 状态白名单收紧到 PENDING/PAID |
+| 🔴 P0 | B5 | inbound Redis 改用 INCRBY |
+| 🔴 P0 | B7 | warmup 用 SETNX |
+| 🟡 P1 | B6 | createOrder 改 AFTER_COMMIT 发 Kafka |
+| 🟡 P1 | B8 | allocateFifo 加 Redisson 锁 |
+| 🟡 P1 | B10/B11/B12 | DLT 路由 + 持久化 + affected==0 throw |
+| 🟡 P1 | B13 | 定时任务接 ShedLock |
+| 🟢 P2 | B14/B15/B16/B17/B18/B19/B20/B21 | 代码质量 |
