@@ -9,6 +9,7 @@ import com.sc.supplychain.enums.FulfillmentOrderStatus;
 import com.sc.supplychain.exception.SupplyChainException;
 import com.sc.supplychain.mapper.FulfillmentOrderMapper;
 import com.sc.supplychain.mapper.FulfillmentRecordMapper;
+import com.sc.supplychain.service.DeliveryService;
 import com.sc.supplychain.service.FulfillmentService;
 import com.sc.supplychain.service.InventoryService;
 import lombok.RequiredArgsConstructor;
@@ -27,6 +28,7 @@ public class FulfillmentServiceImpl implements FulfillmentService {
     private final FulfillmentOrderMapper orderMapper;
     private final FulfillmentRecordMapper recordMapper;
     private final InventoryService inventoryService;
+    private final DeliveryService deliveryService;
 
     /** 默认主仓 ID（生产应从配置或DB读取） */
     private static final Long DEFAULT_WAREHOUSE_ID = 1L;
@@ -117,6 +119,19 @@ public class FulfillmentServiceImpl implements FulfillmentService {
         order.setStatus(FulfillmentOrderStatus.OUTBOUND.getCode());
         orderMapper.updateById(order);
         writeRecord(order.getId(), "OUTBOUND", "system", "FIFO出库确认");
+
+        // ───── Phase 2.1：自动创建配送单 ─────
+        // 注：当前 demo 用仓库默认坐标 + 订单地址（实际应通过地址→经纬度服务转换）
+        try {
+            deliveryService.createFromFulfillment(
+                    order.getId(), whId,
+                    "仓库" + whId, java.math.BigDecimal.valueOf(113.95), java.math.BigDecimal.valueOf(22.55),
+                    order.getAddress(), java.math.BigDecimal.valueOf(113.96), java.math.BigDecimal.valueOf(22.56),
+                    null, null);
+        } catch (Exception e) {
+            log.error("[出库→建配送单] 失败 orderNo={} err={}", orderNo, e.getMessage());
+            // 配送单创建失败不应让出库失败，记录后由人工补建（生产应改 AFTER_COMMIT 异步发事件）
+        }
         log.info("[出库] orderNo={}", orderNo);
     }
 

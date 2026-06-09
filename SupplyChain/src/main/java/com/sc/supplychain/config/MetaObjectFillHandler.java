@@ -18,6 +18,8 @@ public class MetaObjectFillHandler implements MetaObjectHandler {
         this.strictInsertFill(metaObject, "updateTime", LocalDateTime.class, LocalDateTime.now());
         // ExpiryWarning uses warnTime instead of createTime
         this.strictInsertFill(metaObject, "warnTime",   LocalDateTime.class, LocalDateTime.now());
+        // DeliveryTrack uses reportTime
+        this.strictInsertFill(metaObject, "reportTime", LocalDateTime.class, LocalDateTime.now());
     }
 
     @Override

@@ -167,3 +167,22 @@ supply-chain:
     app-id: ${KINGDEE_APP_ID:}
     app-secret: ${KINGDEE_APP_SECRET:}
     timeout: 10000
+
+# ── Phase 2.1 骑手配送 ────────────────────────────────────────────────
+delivery:
+  grab-pool-expire-seconds: 60
+  pickup-timeout-minutes: 15
+  deliver-timeout-minutes: 45
+  reassign-max-count: 3
+  rider-heartbeat-interval-seconds: 30
+  rider-offline-threshold-seconds: 300
+  broadcast-radius-meters: 3000
+  weight-distance: 0.5
+  weight-load: 0.3
+  weight-rating: 0.2
+  base-fee-yuan: 5.0
+  distance-fee-per-km: 1.5
+  free-distance-km: 2.0
+  rush-hour-bonus-yuan: 2.0
+  penalty-per-minute: 0.5
+  penalty-cap-yuan: 5.0

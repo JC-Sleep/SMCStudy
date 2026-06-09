@@ -31,6 +31,25 @@ public class KafkaConfig {
     public static final String TOPIC_INVENTORY_DEDUCT_DLT     = "sc.inventory.deduct.dlt";
     public static final String TOPIC_REPLENISHMENT_TRIGGER_DLT = "sc.replenishment.trigger.dlt";
 
+    // ── Phase 2.1 配送 Topic ─────────────────────────────────────
+    public static final String TOPIC_DELIVERY_CREATE     = "sc.delivery.create";
+    public static final String TOPIC_DELIVERY_DELIVERED  = "sc.delivery.delivered";
+    public static final String TOPIC_DELIVERY_RETURNED   = "sc.delivery.returned";
+    public static final String TOPIC_DELIVERY_ASSIGNED   = "sc.delivery.assigned";
+
+    @Bean public NewTopic deliveryCreateTopic() {
+        return TopicBuilder.name(TOPIC_DELIVERY_CREATE).partitions(5).replicas(1).build();
+    }
+    @Bean public NewTopic deliveryDeliveredTopic() {
+        return TopicBuilder.name(TOPIC_DELIVERY_DELIVERED).partitions(5).replicas(1).build();
+    }
+    @Bean public NewTopic deliveryReturnedTopic() {
+        return TopicBuilder.name(TOPIC_DELIVERY_RETURNED).partitions(3).replicas(1).build();
+    }
+    @Bean public NewTopic deliveryAssignedTopic() {
+        return TopicBuilder.name(TOPIC_DELIVERY_ASSIGNED).partitions(3).replicas(1).build();
+    }
+
     @Bean public NewTopic inventoryDeductTopic() {
         return TopicBuilder.name(TOPIC_INVENTORY_DEDUCT).partitions(10).replicas(1).build();
     }

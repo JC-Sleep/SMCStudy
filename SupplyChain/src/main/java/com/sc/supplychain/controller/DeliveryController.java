@@ -1,46 +1,58 @@
 package com.sc.supplychain.controller;
 
 import com.sc.supplychain.dto.response.ApiResponse;
-import io.swagger.v3.oas.annotations.tags.Tag;
+import com.sc.supplychain.mapper.DeliveryTrackMapper;
+import com.sc.supplychain.service.DeliveryService;
+import com.sc.supplychain.service.DispatchService;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.sc.supplychain.entity.DeliveryTrack;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
-/**
- * 骑手配送接口（Phase2预留外壳）
- * 状态机: PENDING → ASSIGNED → PICKING → IN_TRANSIT → DELIVERED / FAILED
- * TODO Phase2: 实现自动派单、实时位置上报（WebSocket）、超时重派
- */
-@Tag(name = "骑手配送【Phase2预留】")
+/** B 端管理后台 — 骑手配送管理 */
+@Tag(name = "骑手配送管理（B端）")
 @RestController
 @RequestMapping("/api/delivery")
+@RequiredArgsConstructor
 public class DeliveryController {
 
-    @Operation(summary = "派单给骑手 [TODO Phase2]")
-    @PostMapping("/assign")
-    public ApiResponse<Void> assign(@RequestParam Long fulfillmentOrderId,
-                                    @RequestParam Long riderId) {
-        // TODO Phase2: 创建配送单，更新履约订单状态 OUTBOUND → DELIVERING
-        return ApiResponse.error(501, "Phase2 待实现：骑手配送 assign");
+    private final DeliveryService deliveryService;
+    private final DispatchService dispatchService;
+    private final DeliveryTrackMapper trackMapper;
+
+    @Operation(summary = "查询配送单")
+    @GetMapping("/{id}")
+    public ApiResponse<?> get(@PathVariable Long id) {
+        return ApiResponse.ok(deliveryService.get(id));
     }
 
-    @Operation(summary = "骑手取货确认 [TODO Phase2]")
-    @PostMapping("/{deliveryId}/pickup")
-    public ApiResponse<Void> pickup(@PathVariable Long deliveryId) {
-        // TODO Phase2: status ASSIGNED → PICKING → IN_TRANSIT
-        return ApiResponse.error(501, "Phase2 待实现：pickup");
+    @Operation(summary = "手动派单（指定骑手）— 立即派给候选骑手中评分最高")
+    @PostMapping("/{id}/dispatch")
+    public ApiResponse<Boolean> dispatch(@PathVariable Long id) {
+        return ApiResponse.ok(dispatchService.dispatch(id));
     }
 
-    @Operation(summary = "骑手送达确认 [TODO Phase2]")
-    @PostMapping("/{deliveryId}/delivered")
-    public ApiResponse<Void> delivered(@PathVariable Long deliveryId) {
-        // TODO Phase2: status IN_TRANSIT → DELIVERED，同步履约订单 DELIVERED
-        return ApiResponse.error(501, "Phase2 待实现：delivered");
+    @Operation(summary = "强制改派")
+    @PostMapping("/{id}/reassign")
+    public ApiResponse<Void> reassign(@PathVariable Long id) {
+        deliveryService.reassign(id);
+        return ApiResponse.ok();
     }
 
-    @Operation(summary = "查询配送单 [TODO Phase2]")
-    @GetMapping("/{deliveryId}")
-    public ApiResponse<Void> getDelivery(@PathVariable Long deliveryId) {
-        // TODO Phase2: 查询配送单 + 骑手实时位置
-        return ApiResponse.error(501, "Phase2 待实现：query delivery");
+    @Operation(summary = "取消配送")
+    @PostMapping("/{id}/cancel")
+    public ApiResponse<Void> cancel(@PathVariable Long id, @RequestParam(required = false) String reason) {
+        deliveryService.cancel(id, reason);
+        return ApiResponse.ok();
+    }
+
+    @Operation(summary = "查骑手轨迹")
+    @GetMapping("/{id}/track")
+    public ApiResponse<?> track(@PathVariable Long id) {
+        return ApiResponse.ok(trackMapper.selectList(new LambdaQueryWrapper<DeliveryTrack>()
+                .eq(DeliveryTrack::getDeliveryId, id)
+                .orderByAsc(DeliveryTrack::getReportTime)));
     }
 }

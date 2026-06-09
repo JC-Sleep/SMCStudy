@@ -54,4 +54,13 @@ public class RedisConfig {
         script.setResultType(Long.class);
         return script;
     }
+
+    /** 骑手抢单 Lua Script（防超抢） */
+    @Bean(name = "riderGrabScript")
+    public DefaultRedisScript<Long> riderGrabScript() {
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>();
+        script.setScriptSource(new ResourceScriptSource(new ClassPathResource("lua/rider_grab.lua")));
+        script.setResultType(Long.class);
+        return script;
+    }
 }
